@@ -21,5 +21,11 @@ if [ "$TARGET_PLATFORM" = "$BUILDER_PLATFORM" ]; then
 else
     echo " -> 交叉构建"
     export DOCKER_BUILDKIT=1
-    docker buildx build --platform "$TARGET_PLATFORM" -t telebox --load .
+    docker buildx build --platform "$TARGET_PLATFORM" -t telebox --load . || {
+      echo "!! 缺少虚拟化支持, 运行命令以注册"
+      echo "docker run --privileged --rm tonistiigi/binfmt --install all"
+      echo "or"
+      echo "docker run --rm --privileged multiarch/qemu-user-static --reset -p yes"
+      exit 1
+    }
 fi
