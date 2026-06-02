@@ -1,0 +1,63 @@
+name: Sync Upstream
+
+on:
+  schedule:
+    - cron: '0 */6 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: sync-upstream
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Configure Git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Add Upstream Remote
+        run: |
+          git remote add upstream https://github.com/TeleBoxOrg/TeleBox || true
+
+      - name: Fetch Upstream
+        run: |
+          git fetch upstream
+
+      - name: Check For Upstream Updates
+        id: check
+        run: |
+          LOCAL=$(git rev-parse HEAD)
+          REMOTE=$(git rev-parse upstream/main)
+
+          echo "Local: $LOCAL"
+          echo "Remote: $REMOTE"
+
+          if [ "$LOCAL" = "$REMOTE" ]; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "No upstream updates found."
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            echo "Upstream updates detected."
+          fi
+
+      - name: Merge Upstream Changes
+        if: steps.check.outputs.changed == 'true'
+        run: |
+          git merge upstream/main --no-edit --no-ff
+
+      - name: Push Changes
+        if: steps.check.outputs.changed == 'true'
+        run: |
+          git push origin HEAD:main
