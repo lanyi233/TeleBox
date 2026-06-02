@@ -3,8 +3,8 @@ set -e
 
 get_platform() {
     case "${1:-$(uname -m)}" in
-        "x86_64" | "amd64")  echo "linux/amd64" ;;
-        "aarch64" | "arm64") echo "linux/arm64" ;;
+        "x86_64" | "amd64")  echo "amd64" ;;
+        "aarch64" | "arm64") echo "arm64" ;;
         *) echo "❌ 不支持的架构: $1" && exit 1 ;;
     esac
 }
