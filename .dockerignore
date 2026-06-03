@@ -1,0 +1,7 @@
+*.bak
+build_docker.sh
+Dockerfile
+
+.git
+.github
+.gitignore
