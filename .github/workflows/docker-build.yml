@@ -36,8 +36,8 @@ jobs:
         with:
           images: ${{ env.REGISTRY }}/${{ github.repository }}
           tags: |
-            type=sha,format=short,prefix={{date 'YYYYMMDD'}}-,suffix=-amd64
             type=raw,value=amd64
+            type=sha,format=short,suffix=-amd64
 
       - name: Build and push AMD64 image
         uses: docker/build-push-action@v5
@@ -78,8 +78,8 @@ jobs:
         with:
           images: ${{ env.REGISTRY }}/${{ github.repository }}
           tags: |
-            type=sha,format=short,prefix={{date 'YYYYMMDD'}}-,suffix=-arm64
             type=raw,value=arm64
+            type=sha,format=short,suffix=-arm64
 
       - name: Build and push ARM64 image
         uses: docker/build-push-action@v5
