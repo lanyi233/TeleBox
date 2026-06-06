@@ -1,0 +1,9 @@
+services:
+  telebox:
+    image: ghcr.io/lanyi233/telebox:latest
+    restart: unless-stopped
+    volumes:
+      - './.env:/app/.env' # touch .env
+      - './config.json:/app/config.json' # touch config.json
+      - './plugins:/app/plugins'
+      - './assets:/app/assets'

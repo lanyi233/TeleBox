@@ -1,5 +1,6 @@
 *.bak
 build_docker.sh
+tb.sh
 Dockerfile
 
 .git
