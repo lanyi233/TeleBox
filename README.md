@@ -5,7 +5,7 @@
 [![License](https://img.shields.io/badge/License-LGPL%202.1-blue.svg?style=for-the-badge)](LICENSE)
 [![Node.js](https://img.shields.io/badge/Node.js-24.x-green.svg?style=for-the-badge&logo=node.js)](https://nodejs.org/)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.9.2-blue.svg?style=for-the-badge&logo=typescript)](https://www.typescriptlang.org/)
-[![Version](https://img.shields.io/badge/Version-0.2.7-orange.svg?style=for-the-badge)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/Version-0.2.8-orange.svg?style=for-the-badge)](CHANGELOG.md)
 
 **现代化 Telegram UserBot 开发框架**
 
@@ -316,15 +316,15 @@ abstract class Plugin {
 |  🏗️ **技术领域**   |   🔧 **技术选型**    | 📊 **版本** |
 | :----------------: | :------------------: | :---------: |
 |   🚀 **运行时**    |       Node.js        |    `24.x`    |
-|  💎 **开发语言**   |      TypeScript      |   `5.9.2`   |
-| 📡 **Telegram 库** |       Teleproto       |  `^1.223.1` |
-|   💾 **数据库**    |    better-sqlite3    |  `12.2.0`   |
-|   💾 **数据库**    |        lowdb         |   `7.0.1`   |
-|  ⚡ **构建工具**   | tsx + tsconfig-paths |  `latest`   |
-| 🌐 **HTTP 客户端** |        axios         |  `1.11.0`   |
-|  🖼️ **图像处理**   |        sharp         |  `0.34.3`   |
-|   🧰 **工具库**    |        lodash        |  `4.17.21`  |
-|  ⏰ **任务调度**   |         cron         |   `4.3.3`   |
+|  💎 **开发语言**   |      TypeScript      |   `^5.9.2`   |
+| 📡 **Telegram 库** |       Teleproto       |  `^1.225.4` |
+|   💾 **数据库**    |    better-sqlite3    |  `^12.2.0`   |
+|   💾 **数据库**    |        lowdb         |   `^7.0.1`   |
+|  ⚡ **构建工具**   | tsx + tsconfig-paths |  `^4.20.4`   |
+| 🌐 **HTTP 客户端** |        axios         |  `^1.11.0`   |
+|  🖼️ **图像处理**   |        sharp         |  `^0.34.3`   |
+|   🧰 **工具库**    |        lodash        |  `^4.17.21`  |
+|  ⏰ **任务调度**   |         cron         |   `^4.3.3`   |
 
 </div>
 
@@ -373,7 +373,7 @@ abstract class Plugin {
 
 ```bash
 # 🚀 启动开发模式
-NODE_ENV=development tpm run dev
+npm run dev
 ```
 
 💡 _开发模式下使用_ `!` _和_ `！` _作为命令前缀_

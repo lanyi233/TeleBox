@@ -26,8 +26,6 @@
   - [config.json - Telegram API 配置](#configjson---telegram-api配置)
   - [.env - 环境变量配置](#env---环境变量配置)
   - [package.json - 项目配置](#packagejson---项目配置)
-- [进程管理配置](#进程管理配置)
-  - [ecosystem.config.js - PM2配置](#ecosystemconfigjs---pm2配置)
 - [环境变量详解](#环境变量详解)
   - [命令前缀配置](#命令前缀配置)
   - [插件行为配置](#插件行为配置)
@@ -208,8 +206,7 @@ telebox/
 ├── config.json            # Telegram API配置
 ├── .env                   # 环境变量配置
 ├── package.json          # 项目配置
-├── tsconfig.json         # TypeScript配置
-└── ecosystem.config.js   # PM2进程管理配置
+└── tsconfig.json         # TypeScript配置
 ```
 
 ### 核心模块
@@ -373,10 +370,10 @@ utils/* (工具模块)
 
 ### 版本信息
 
-- **当前版本**: 0.2.6
+- **当前版本**: 0.2.8
 - **Node.js要求**: 24.x
 - **TypeScript版本**: ^5.9.2
-- **Telegram库版本**: ^2.26.22
+- **Telegram库版本**: ^1.225.4
 - **协议**: LGPL-2.1-only
 
 ## 🔌 插件系统
@@ -882,11 +879,11 @@ TB_LISTENER_HANDLE_EDITED="sudo sure"
 ```json
 {
   "name": "telebox",
-  "version": "0.2.6",
+  "version": "0.2.8",
   "scripts": {
-    "start": "tsx -r tsconfig-paths/register ./src/index.ts",
-    "tpm": "tsx -r tsconfig-paths/register ./src/plugin/tpm.ts",
-    "dev": "NODE_ENV=development tsx -r tsconfig-paths/register ./src/index.ts"
+    "start": "node scripts/run-tsx.cjs ./src/index.ts",
+    "tpm": "node scripts/run-tsx.cjs ./src/plugin/tpm.ts",
+    "dev": "NODE_ENV=development node scripts/run-tsx.cjs ./src/index.ts"
   },
   "repository": {
     "type": "git",
@@ -894,7 +891,7 @@ TB_LISTENER_HANDLE_EDITED="sudo sure"
   },
   "license": "LGPL-2.1-only",
   "dependencies": {
-    "telegram": "^2.26.22",
+    "teleproto": "^1.225.4",
     "dotenv": "^17.2.2",
     "cron": "^4.3.3",
     "axios": "^1.11.0",
@@ -902,7 +899,7 @@ TB_LISTENER_HANDLE_EDITED="sudo sure"
     "lowdb": "^7.0.1",
     "lodash": "^4.17.21",
     "dayjs": "^1.11.18",
-    "cheerio": "^1.1.2",
+    "cheerio": "^1.2.0",
     "better-sqlite3": "^12.2.0",
     "opencc-js": "^1.0.5",
     "modern-gif": "^2.0.4",
@@ -913,44 +910,6 @@ TB_LISTENER_HANDLE_EDITED="sudo sure"
   }
 }
 ```
-
-### 进程管理配置
-
-#### ecosystem.config.js - PM2配置
-
-**作用**：使用PM2进行进程管理和自动重启
-
-```javascript
-module.exports = {
-  apps: [
-    {
-      name: "telebox",
-      script: "npm",
-      args: "start",
-      cwd: __dirname,
-      error_file: "./logs/error.log",
-      out_file: "./logs/out.log",
-      merge_logs: true,
-      time: true,
-      autorestart: true,
-      max_restarts: 10,
-      min_uptime: "10s",
-      restart_delay: 4000,
-      env: {
-        NODE_ENV: "production"
-      }
-    }
-  ]
-}
-```
-
-**配置说明**：
-- `name` - 进程名称
-- `script` - 启动脚本（使用npm start）
-- `error_file` / `out_file` - 日志文件路径
-- `autorestart` - 自动重启
-- `max_restarts` - 最大重启次数
-- `restart_delay` - 重启延迟时间
 
 ### 环境变量详解
 

@@ -1,6 +1,6 @@
 {
   "name": "telebox",
-  "version": "0.2.7",
+  "version": "0.2.8",
   "description": "",
   "scripts": {
     "start": "node scripts/run-tsx.cjs ./src/index.ts",
@@ -9,16 +9,16 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/TeleBoxDev/TeleBox.git"
+    "url": "git+https://github.com/TeleBoxOrg/TeleBox.git"
   },
   "keywords": [],
   "author": "",
   "license": "LGPL-2.1-only",
   "type": "commonjs",
   "bugs": {
-    "url": "https://github.com/TeleBoxDev/TeleBox/issues"
+    "url": "https://github.com/TeleBoxOrg/TeleBox/issues"
   },
-  "homepage": "https://github.com/TeleBoxDev/TeleBox#readme",
+  "homepage": "https://github.com/TeleBoxOrg/TeleBox#readme",
   "engines": {
     "node": "24.x"
   },
@@ -55,7 +55,7 @@
     "qrcode-terminal": "^0.12.0",
     "sharp": "^0.34.3",
     "ssh2": "^1.15.0",
-    "teleproto": "^1.223.1",
+    "teleproto": "^1.225.4",
     "tsconfig-paths": "^4.2.0",
     "tsx": "^4.20.4",
     "typescript": "^5.9.2"
