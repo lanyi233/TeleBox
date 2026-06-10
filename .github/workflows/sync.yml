@@ -15,6 +15,8 @@ concurrency:
 jobs:
   sync:
     runs-on: ubuntu-latest
+    outputs:
+      changed: ${{ steps.check.outputs.changed }}
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
@@ -61,3 +63,15 @@ jobs:
         if: steps.check.outputs.changed == 'true'
         run: |
           git push origin HEAD:main
+
+  trigger-build:
+    needs: sync
+    if: needs.sync.outputs.changed == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger Docker Build workflow
+        uses: benc-uk/workflow-dispatch@v1
+        with:
+          workflow: docker-build.yml
+          token: ${{ secrets.GITHUB_TOKEN }}
+          ref: main
