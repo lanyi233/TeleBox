@@ -9,11 +9,11 @@ do_start(){
     docker compose up -d
 }
 do_stop(){
-    docker compose up -d
+    docker compose down
 }
 do_restart(){
-    do_start
     do_stop
+    do_start
 }
 do_logs(){
     docker compose logs -f
