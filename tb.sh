@@ -5,32 +5,54 @@ if ! [ "$(uname)" == "Linux" ]; then
     exit 1
 fi
 
+do_start(){
+    docker compose up -d
+}
+do_stop(){
+    docker compose up -d
+}
+do_restart(){
+    do_start
+    do_stop
+}
+do_logs(){
+    docker compose logs -f
+}
+do_update(){
+    docker compose pull
+    do_restart
+}
+
 case $1 in
-    start)
-        docker compose up -d
+    start|s|up)
+        do_start
         ;;
-    stop)
-        docker compose down
+    stop|s|down)
+        do_stop
         ;;
-    restart)
-        docker compose down
-        docker compose up -d
+    restart|r)
+        do_restart
         ;;
-    logs)
-        docker compose logs -f
+    logs|l)
+        do_logs
         ;;
-    update)
-        echo ":: 更新后需 $0 restart 以应用更新"
-        docker compose pull
+    update|u)
+        do_update
         ;;
-    login)
+    login|l)
         echo ":: 登录完成后按下 Ctrl+C 以退出登录流程"
-        echo ":: $0 start 启动"
+        echo ":: 执行 $0 start 启动"
         touch .env config.json
         mkdir plugins assets
         docker compose run -it --rm telebox
         ;;
     *)
-        echo "$0 {start|stop|restart|login|update|logs}"
+        echo "$0 {start|up|stop|down|restart|login|update|logs}
+:: 启动 start | up
+:: 停止 stop | down
+:: 重启 restart
+:: 日志 logs
+:: 更新 update
+:: 登录 login"
         ;;
 esac
