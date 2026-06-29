@@ -262,7 +262,11 @@ async function getDatabase() {
 
 async function getMediaFileName(msg: any): Promise<string> {
   const metadata = msg.media as any;
-  return metadata.document.attributes[0].fileName;
+  const attributes = metadata?.document?.attributes;
+  if (!attributes || attributes.length === 0) {
+    throw new Error("Message media has no document attributes");
+  }
+  return attributes[0].fileName;
 }
 
 function normalizeGithubUrl(input: string): string {
@@ -485,7 +489,7 @@ async function installAllPlugins(msg: Api.Message) {
         await lifecycleDelay(100, "tpm:batch-install-throttle");
       } catch (error) {
         failedCount++;
-        failedPlugins.push(`${plugin} (${htmlEscape(String(error))})`);
+        failedPlugins.push(`${plugin} (${String(error)})`);
         console.error(`[TPM] 安装插件 ${plugin} 失败:`, error);
       }
     }
@@ -608,7 +612,7 @@ async function installMultiplePlugins(pluginNames: string[], msg: Api.Message) {
         await lifecycleDelay(100, "tpm:batch-install-throttle");
       } catch (error) {
         failedCount++;
-        failedPlugins.push(`${pluginName} (${htmlEscape(String(error))})`);
+        failedPlugins.push(`${pluginName} (${String(error)})`);
         console.error(`[TPM] 安装插件 ${pluginName} 失败:`, error);
       }
     }
@@ -1324,7 +1328,7 @@ async function updateAllPlugins(msg: Api.Message) {
         await lifecycleDelay(100, "tpm:update-throttle");
       } catch (error) {
         failedCount++;
-        failedPlugins.push(`${pluginName} (${htmlEscape(String(error))})`);
+        failedPlugins.push(`${pluginName} (${String(error)})`);
         console.error(`[TPM] 更新插件 ${pluginName} 失败:`, error);
       }
     }
