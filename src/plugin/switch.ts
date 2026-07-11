@@ -281,6 +281,9 @@ const plugin = new (class extends Plugin {
     }
 
     await msg.edit({ text: T.goSwitching(target) });
+    // 记录消息 ID，等目标版本上线后用新客户端编辑状态
+    state.pendingNotification = { chatId: Number(msg.chatId), msgId: msg.id, target };
+    saveSwitchState(state, DEFAULT_SWITCH_HOME);
 
     const child = spawn(
       "npx", ["tsx", path.join(repoRoot, "src", "utils", "versionSwitchController.ts")],
@@ -288,11 +291,6 @@ const plugin = new (class extends Plugin {
         env: { ...process.env, SWITCH_SKIP_LOGIN: "1", SWITCH_SOURCE: current, SWITCH_TARGET: target } },
     );
     child.unref();
-
-    // 切过去之后平台变了，这条回复可能发不出去，但在当前 bot 被停止之前能发出
-    setTimeout(() => {
-      msg.reply({ message: T.goDone(target) }).catch(() => {});
-    }, 8_000);
   }
 
   private async handleRevert(msg: Api.Message): Promise<void> {
@@ -306,16 +304,17 @@ const plugin = new (class extends Plugin {
 
     await msg.edit({ text: T.revertStarted() });
 
+    // revert 就是往另一个版本切，controller 需要标准的 source/target 参数
+    const revertTarget: TeleBoxVersion = state.activeVersion === "teleproto" ? "mtcute" : "teleproto";
+    state.pendingNotification = { chatId: Number(msg.chatId), msgId: msg.id, target: revertTarget };
+    saveSwitchState(state, DEFAULT_SWITCH_HOME);
+
     const child = spawn(
       "npx", ["tsx", "/root/telebox/src/utils/versionSwitchController.ts"],
       { cwd: "/root/telebox", detached: true, stdio: "ignore",
-        env: { ...process.env, SWITCH_REVERT: "1", SWITCH_REVERT_TARGET: state.activeVersion, SWITCH_REVERT_SOURCE: current } },
+        env: { ...process.env, SWITCH_SKIP_LOGIN: "1", SWITCH_SOURCE: current, SWITCH_TARGET: revertTarget } },
     );
     child.unref();
-
-    setTimeout(() => {
-      msg.reply({ message: T.revertDone() }).catch(() => {});
-    }, 8_000);
   }
 })();
 
