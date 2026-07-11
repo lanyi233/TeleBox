@@ -1,7 +1,6 @@
 import path from "path";
 import fs from "fs";
 import { isValidPlugin, Plugin } from "@utils/pluginBase";
-import { getGlobalClient, getCurrentGeneration } from "@utils/runtimeManager";
 import { NewMessageEvent, NewMessage } from "teleproto/events";
 import { AliasDB } from "./aliasDB";
 import { Api } from "teleproto";
@@ -385,6 +384,7 @@ function trackClientEventHandler<TEvent>(
     (trackedHandler) => client.addEventHandler(trackedHandler, eventBuilder),
     (trackedHandler) => client.removeEventHandler(trackedHandler, eventBuilder),
     (event) => {
+      const { getCurrentGeneration } = require("./runtimeManager") as typeof import("./runtimeManager");
       if (runtime.generation !== getCurrentGeneration()) return;
       return handler(event);
     },
@@ -456,6 +456,7 @@ function dealCronPlugin(runtime: TeleBoxRuntime): void {
       for (const key of keys) {
         const cronTask = cronTasks[key];
         cronManager.set(key, cronTask.cron, async () => {
+          const { getCurrentGeneration, getGlobalClient } = require("./runtimeManager") as typeof import("./runtimeManager");
           if (runtime.signal.aborted || runtime.generation !== getCurrentGeneration()) return;
           const client = await getGlobalClient();
           await cronTask.handler(client);
@@ -490,19 +491,9 @@ async function unloadPluginsForRuntime(runtime: TeleBoxRuntime) {
     await runPluginCleanup(plugin, runtime);
   }
 
-  const snapshot = runtime.context.snapshot();
   const handlerCount = runtime.client.listEventHandlers().length;
-  const disposableCount = snapshot.trackedDisposables;
-  const resourceSummary = Object.entries(snapshot.stats)
-    .filter(([, stat]) => stat.created > 0 || stat.active > 0)
-    .map(([kind, stat]) => `${kind}:active=${stat.active},created=${stat.created}`)
-    .join("; ") || "none";
-  const residualSummary = snapshot.residualResources
-    .slice(0, 10)
-    .map((resource) => `${resource.kind}:${resource.label}:${resource.state}:${resource.ageMs}ms`)
-    .join("; ") || "none";
   console.log(
-    `[RELOAD] Generation ${runtime.generation} stopped ingress; ${handlerCount} client handlers and ${disposableCount} lifecycle disposables are awaiting drain. resources=[${resourceSummary}] residual=[${residualSummary}]`
+    `[RELOAD] Gen${runtime.generation} unloading plugins: ${handlerCount} client handlers to drain`
   );
 
   validPlugins.length = 0;
