@@ -7,11 +7,11 @@ import { logger } from "./logger";
 import { initializeClientSession } from "./loginManager";
 
 // ── Fix teleproto main-DC media upload deadlock ────────────────────────────
-// teleproto 1.227.5 routes upload.SaveFilePart through a separate media
-// sender even when the target is the account's main DC. On this session that
-// media sender's auth is rejected and every part waits through all scheduler
-// deadlines, while the exact same SaveFilePart succeeds immediately through
-// the already-authorized main sender.
+// teleproto (through 1.228.0) still routes upload.SaveFilePart through a
+// separate media sender even when the target is the account's main DC. On
+// affected sessions that media sender's auth is rejected and every part waits
+// through all scheduler deadlines, while the exact same SaveFilePart succeeds
+// immediately through the already-authorized main sender.
 //
 // Route only main-DC uploads through client.invoke(). Non-main DC operations
 // retain the native MediaScheduler path (including migration/retry logic).
@@ -54,51 +54,6 @@ import { initializeClientSession } from "./loginManager";
   }
 })();
 
-// ── SOCKS5 proxy keepalive & timeout patch ────────────────────────────────
-// teleproto's PromisedNetSockets creates raw sockets without keepalive.
-// This causes Telegram servers to silently drop idle proxy connections.
-// We inject a custom networkSocket class that enables TCP keepalive and
-// applies the user-configured SOCKS connection timeout.
-// ───────────────────────────────────────────────────────────────────────────
-let CustomPromisedNetSockets: typeof import("teleproto/extensions").PromisedNetSockets;
-(function patchPromisedNetSockets() {
-  try {
-    const { PromisedNetSockets } = require("teleproto/extensions/PromisedNetSockets");
-
-    // Use a global to pass keepalive config from createClient to the socket class
-    (globalThis as any).__telebox_keepalive_interval = 30_000;
-
-    // Create a subclass that adds keepalive support
-    CustomPromisedNetSockets = class extends PromisedNetSockets {
-      private _keepaliveInterval: number;
-
-      constructor(proxy?: import("teleproto/network/connection/TCPMTProxy").ProxyInterface) {
-        super(proxy);
-        this._keepaliveInterval = (globalThis as any).__telebox_keepalive_interval ?? 30_000;
-      }
-
-      async connect(port: number, ip: string): Promise<this> {
-        const result = await super.connect(port, ip);
-        // Enable TCP keepalive on the underlying socket (works for both direct and SOCKS)
-        if (this.client && typeof this.client.setKeepAlive === "function") {
-          this.client.setKeepAlive(true, this._keepaliveInterval);
-          // Also disable Nagle for lower latency on small packets
-          this.client.setNoDelay(true);
-        }
-        return result;
-      }
-    } as new (proxy?: import("teleproto/network/connection/TCPMTProxy").ProxyInterface) => InstanceType<typeof PromisedNetSockets>;
-
-    // Export the setter for createClient to use
-    (globalThis as any).__telebox_set_keepalive = (ms: number) => {
-      (globalThis as any).__telebox_keepalive_interval = ms;
-    };
-  } catch (_) {
-    // teleproto not available — skip patch
-    CustomPromisedNetSockets = require("teleproto/extensions/PromisedNetSockets").PromisedNetSockets;
-    (globalThis as any).__telebox_set_keepalive = () => {};
-  }
-})();
 import {
   loadPluginsForRuntime,
   unloadPluginsForRuntime,
@@ -111,6 +66,9 @@ import {
   type DrainResult,
   type GenerationContext,
 } from "./generationContext";
+import { withTimeout } from "./asyncHelpers";
+import { registerRuntimeAccess } from "./runtimeAccess";
+import { flushPendingStatusDeletes } from "./postReloadMessage";
 
 export type { GenerationContext };
 
@@ -145,28 +103,6 @@ function logDrainResult(runtime: TeleBoxRuntime, reason: string, result: DrainRe
   );
 }
 
-async function withTimeout<T>(
-  promise: Promise<T>,
-  ms: number,
-  label: string
-): Promise<T> {
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  try {
-    return await Promise.race([
-      promise,
-      new Promise<T>((_, reject) => {
-        timer = setTimeout(() => {
-          reject(new Error(`${label} timed out after ${ms}ms`));
-        }, ms);
-      }),
-    ]);
-  } finally {
-    if (timer) {
-      clearTimeout(timer);
-    }
-  }
-}
-
 async function createClient(): Promise<TelegramClient> {
   const api = await getApiConfig();
   const proxy = api.proxy;
@@ -174,12 +110,11 @@ async function createClient(): Promise<TelegramClient> {
     console.log("使用代理连接 Telegram:", proxy);
   }
 
-  const keepaliveInterval = proxy?.keepaliveInterval ?? 30_000;
-  const connectionTimeout = proxy?.timeout ?? 10; // seconds
-
-  // Set global keepalive interval for our patched PromisedNetSockets
-  if ((globalThis as any).__telebox_set_keepalive) {
-    (globalThis as any).__telebox_set_keepalive(keepaliveInterval);
+  // teleproto ≥1.228.0 enables TCP keepalive + setNoDelay natively in
+  // PromisedNetSockets (hardcoded 30s). No CustomPromisedNetSockets needed.
+  // Keep proxy.timeout default so SOCKS connect doesn't hang forever.
+  if (proxy && !proxy.timeout) {
+    proxy.timeout = 10; // seconds
   }
 
   const client = new TelegramClient(
@@ -192,13 +127,8 @@ async function createClient(): Promise<TelegramClient> {
       autoReconnect: true,
       deviceModel: readAppName(),
       proxy,
-      networkSocket: CustomPromisedNetSockets,
     }
   );
-  // Ensure proxy timeout is set for SOCKS connection
-  if (proxy && !proxy.timeout) {
-    proxy.timeout = connectionTimeout;
-  }
   client.setLogLevel(logger.getGramJSLogLevel() as never);
   return client;
 }
@@ -276,8 +206,14 @@ async function resolvePendingSwitchNotification(
     if (!notification || notification.target !== currentVersion) return;
 
     const icon = currentVersion === "teleproto" ? "🟦" : "🟧";
-    const label = currentVersion === "teleproto" ? "teleproto (gramjs)" : "mtcute (native)";
-    const text = `🎉 **切换完成！** 现在运行的是 ${icon} ${label}\n\n想切回去？发 \`.switch revert\` 就行。`;
+    const label = currentVersion === "teleproto" ? "TeleBox Classic" : "TeleBox-Next";
+    const other = currentVersion === "teleproto" ? "TeleBox-Next" : "TeleBox Classic";
+    const summary = notification.summary ? `\n\n${notification.summary}` : "";
+    const text =
+      `🎉 **切换完成**\n\n` +
+      `现在运行：${icon} **${label}**` +
+      summary +
+      `\n\n再切回去：发 \`.switch go\`（会切到 ${other}）。`;
 
     await client.editMessage(notification.chatId, {
       message: notification.msgId,
@@ -308,6 +244,7 @@ async function startFreshRuntime(): Promise<TeleBoxRuntime> {
     await loadPluginsForRuntime(runtime);
     // 切换后上线后，编辑之前留下的"正在切换…"通知消息
     await resolvePendingSwitchNotification(runtime.client, "teleproto");
+    void flushPendingStatusDeletes().catch((e) => console.warn("[RUNTIME] pending status deletes:", e));
     runtime.state = "running";
     return runtime;
   } catch (error) {
@@ -500,3 +437,13 @@ export async function shutdownRuntime(): Promise<void> {
   await unloadPluginsForRuntime(runtime);
   await disposeRuntime(runtime, "Runtime shutdown");
 }
+
+// Register late-bound accessors so pluginManager / channelGapBreaker /
+// loginManager never need to import this module (breaks the cycle).
+registerRuntimeAccess({
+  getCurrentGeneration,
+  tryGetCurrentRuntime,
+  getGlobalClient,
+  reloadRuntime,
+  startRuntime,
+});

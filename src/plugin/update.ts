@@ -7,6 +7,7 @@ import { npm_install_project_dependencies } from "@utils/npm_install";
 import { getGlobalClient } from "@utils/runtimeManager";
 import { executeExit } from "./reload";
 import { updateAllPlugins } from "./tpm";
+import { deleteStatusMessage } from "@utils/postReloadMessage";
 import * as fs from "fs";
 import * as path from "path";
 import * as os from "os";
@@ -188,7 +189,8 @@ async function autoUpdateMainRepo(githubMsg: Api.Message): Promise<void> {
     // uses execFileSync (synchronous), which blocks the event loop and can cause the teleproto
     // connection to drop. After that, statusMsg._client is stale and statusMsg.delete() fails
     // silently (caught by catch(_){}). Same root cause as the plugin auto-update bug (21de22c).
-    const targetPeerId = statusMsg.peerId;
+    // Prefer marked chat id string — survives entity-cache wipe after npm/reload
+    const targetPeerId = normalizeChatId(statusMsg) || statusMsg.peerId;
     const targetMsgId = statusMsg.id;
 
     const branchInfo = await findMainBranch();
@@ -218,30 +220,9 @@ async function autoUpdateMainRepo(githubMsg: Api.Message): Promise<void> {
 }
 
 /**
- * Delete a status message using a fresh client from getGlobalClient().
- * The original message object's _client may be stale after:
- *   - npm_install_project_dependencies() (execFileSync, blocks event loop)
- *   - reloadRuntime() (destroys old client, creates new one)
- * Uses exponential backoff retry — the new client may need several seconds
- * to fully establish its connection and entity cache.
+ * Delete a status message using a fresh client — see
+ * @utils/postReloadMessage.deleteStatusMessage.
  */
-async function deleteStatusMessage(peerId: any, msgId: number): Promise<void> {
-  const delays = [0, 2000, 4000, 8000]; // exponential backoff
-  for (let attempt = 0; attempt < delays.length; attempt++) {
-    if (delays[attempt] > 0) {
-      await new Promise((r) => setTimeout(r, delays[attempt]));
-    }
-    try {
-      const freshClient = await getGlobalClient();
-      await (freshClient as any).deleteMessages(peerId, [msgId], { revoke: true });
-      console.log(`[auto-update] 状态消息已删除 (attempt ${attempt + 1})`);
-      return;
-    } catch (err: any) {
-      console.error(`[auto-update] 删除状态消息失败 (attempt ${attempt + 1}):`, err?.message || err);
-    }
-  }
-  console.error("[auto-update] 状态消息删除最终失败，已重试4次");
-}
 
 async function executeAutoExit(): Promise<void> {
   // Minimal restart: just exit the process. pm2 will restart it.
@@ -256,7 +237,7 @@ async function autoUpdatePlugins(githubMsg: Api.Message): Promise<void> {
     const statusMsg = (await githubMsg.reply({ message: "🤖 自动更新：检测到插件仓库新提交，正在更新插件…" }))!;
     // Snapshot before updateAllPlugins → reloadAndFinalize → loadPlugins()
     // (plugin reload invalidates statusMsg's internal _client reference)
-    const fallbackPeerId = statusMsg.peerId;
+    const fallbackPeerId = normalizeChatId(statusMsg) || statusMsg.peerId;
     const fallbackMsgId = statusMsg.id;
 
     const result = await updateAllPlugins(statusMsg);
@@ -272,13 +253,45 @@ async function autoUpdatePlugins(githubMsg: Api.Message): Promise<void> {
 }
 
 // ── GitHubBot message parsing ──────────────────────────────────────────
+// Channel: GitHub commit notifications (hardcoded product channel)
 const GITHUB_CHANNEL_ID = "-1003061608291";
+// GitHubBot user id (stable; username may be missing on live NewMessage events)
+const GITHUB_BOT_USER_ID = "107550100";
+const GITHUB_BOT_USERNAME = "githubbot";
 
-// Regex to match commit notifications:
-//   "new commit <sha> to <repo>:<branch>" (English)
-//   or Chinese/other variants
-const MAIN_REPO_PATTERN = /new commit.*to\s+(TeleBox|TeleBox_M)\s*:\s*main/i;
-const PLUGIN_REPO_PATTERN = /new commit.*to\s+(TeleBox_Plugins|TeleBox_M_Plugins)\s*:\s*main/i;
+// Real bot text (2026-07): "🔨 1 new commit to TeleBox:main:\n\n28d6511: …"
+// Also accept optional TeleBoxOrg/ prefix and legacy TeleBox_M names.
+const MAIN_REPO_PATTERN =
+  /new commit[\s\S]*?to\s+(?:TeleBoxOrg\/)?(TeleBox|TeleBox_M|TeleBox-Next)\s*:\s*main/i;
+const PLUGIN_REPO_PATTERN =
+  /new commit[\s\S]*?to\s+(?:TeleBoxOrg\/)?(TeleBox_Plugins|TeleBox_M_Plugins|TeleBox-Next_Plugins)\s*:\s*main/i;
+
+function normalizeChatId(msg: Api.Message): string {
+  if (msg.chatId != null) return String(msg.chatId);
+  const peer = msg.peerId as
+    | { className?: string; channelId?: { toString(): string }; userId?: { toString(): string }; chatId?: { toString(): string } }
+    | undefined;
+  if (peer?.channelId != null) return `-100${String(peer.channelId)}`;
+  if (peer?.userId != null) return String(peer.userId);
+  if (peer?.chatId != null) {
+    const id = String(peer.chatId);
+    return id.startsWith("-") ? id : `-${id}`;
+  }
+  return "";
+}
+
+function isGitHubBot(msg: Api.Message): boolean {
+  const sid = msg.senderId != null ? String(msg.senderId) : "";
+  if (sid && sid === GITHUB_BOT_USER_ID) return true;
+  const uname = String((msg.sender as { username?: string } | undefined)?.username || "")
+    .toLowerCase()
+    .replace(/^@/, "");
+  if (uname === GITHUB_BOT_USERNAME) return true;
+  // fromId PeerUser fallback when sender entity not hydrated
+  const from = msg.fromId as { userId?: { toString(): string } } | undefined;
+  if (from?.userId != null && String(from.userId) === GITHUB_BOT_USER_ID) return true;
+  return false;
+}
 
 class UpdatePlugin extends Plugin {
   description: string =
@@ -318,21 +331,21 @@ class UpdatePlugin extends Plugin {
     const state = loadAutoUpdateState();
     if (!state.enabled) return;
 
-    // Only in the target channel
-    if (String(msg.chatId) !== GITHUB_CHANNEL_ID) return;
+    const chatId = normalizeChatId(msg);
+    if (chatId !== GITHUB_CHANNEL_ID) return;
 
-    // Only from GitHubBot
-    if ((msg.sender as any)?.username !== "GitHubBot") return;
+    if (!isGitHubBot(msg)) return;
 
     const text = msg.message || "";
-    if (!text) return;
+    if (!text || !/new commit/i.test(text)) return;
 
-    if (MAIN_REPO_PATTERN.test(text)) {
-      console.log("[auto-update] 检测到主仓库提交，开始自动更新…");
-      await autoUpdateMainRepo(msg);
-    } else if (PLUGIN_REPO_PATTERN.test(text)) {
+    // Plugin repos first — "TeleBox_Plugins" also contains substring "TeleBox"
+    if (PLUGIN_REPO_PATTERN.test(text)) {
       console.log("[auto-update] 检测到插件仓库提交，开始自动更新插件…");
       await autoUpdatePlugins(msg);
+    } else if (MAIN_REPO_PATTERN.test(text)) {
+      console.log("[auto-update] 检测到主仓库提交，开始自动更新…");
+      await autoUpdateMainRepo(msg);
     }
   };
 }
