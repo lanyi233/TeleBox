@@ -2,8 +2,8 @@ name: Notify TeleBoxLabs Mirror
 
 # 上游 main 有提交时立刻触发 TeleBoxLabs fork 的同步
 on:
-  push:
-    branches: [main]
+  # push:
+  #   branches: [main]
   workflow_dispatch:
 
 concurrency:
