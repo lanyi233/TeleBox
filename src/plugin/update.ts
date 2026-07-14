@@ -7,7 +7,6 @@ import { npm_install_project_dependencies } from "@utils/npm_install";
 import { getGlobalClient } from "@utils/runtimeManager";
 import { executeExit } from "./reload";
 import { updateAllPlugins } from "./tpm";
-import { deleteStatusMessage } from "@utils/postReloadMessage";
 import * as fs from "fs";
 import * as path from "path";
 import * as os from "os";
@@ -178,21 +177,95 @@ async function update(force = false, msg: Api.Message) {
   }
 }
 
-// ── Auto-update for main repo ──────────────────────────────────────────
-async function autoUpdateMainRepo(githubMsg: Api.Message): Promise<void> {
-  let statusMsg: Api.Message | undefined;
+// ── Pending reaction: apply ✅ only AFTER the process fully restarts ─────
+// The main-repo path restarts the process (npm install + exit). Reacting
+// before exit lands ✅ while the OLD code is still (barely) running and the
+// connection is being torn down. Instead we persist the intent and re-apply
+// it once the NEW runtime is fully online — the moment equivalent to seeing
+// the manual-update "已完成" summary.
+const PENDING_REACTION_FILE = path.join(os.homedir(), ".telebox", "pending_reactions.json");
+
+interface PendingReaction {
+  chatId: string;
+  msgId: number;
+  queuedAt: number;
+}
+
+function loadPendingReactions(): PendingReaction[] {
   try {
-    statusMsg = await githubMsg.reply({ message: "🤖 自动更新：检测到主仓库新提交，正在更新…" });
-    if (!statusMsg) throw new Error("无法发送状态消息");
+    if (!fs.existsSync(PENDING_REACTION_FILE)) return [];
+    const raw = JSON.parse(fs.readFileSync(PENDING_REACTION_FILE, "utf8"));
+    return Array.isArray(raw) ? (raw as PendingReaction[]) : [];
+  } catch {
+    return [];
+  }
+}
 
-    // Snapshot peerId+msgId before any blocking operation — npm_install_project_dependencies()
-    // uses execFileSync (synchronous), which blocks the event loop and can cause the teleproto
-    // connection to drop. After that, statusMsg._client is stale and statusMsg.delete() fails
-    // silently (caught by catch(_){}). Same root cause as the plugin auto-update bug (21de22c).
-    // Prefer marked chat id string — survives entity-cache wipe after npm/reload
-    const targetPeerId = normalizeChatId(statusMsg) || statusMsg.peerId;
-    const targetMsgId = statusMsg.id;
+function savePendingReactions(items: PendingReaction[]): void {
+  try {
+    fs.mkdirSync(path.dirname(PENDING_REACTION_FILE), { recursive: true });
+    fs.writeFileSync(PENDING_REACTION_FILE, JSON.stringify(items.slice(-50), null, 2), "utf8");
+  } catch (e) {
+    console.error("[auto-update] 保存待点 reaction 失败:", e);
+  }
+}
 
+function queueReaction(chatId: string, msgId: number): void {
+  if (!chatId || !msgId) return;
+  const items = loadPendingReactions().filter((x) => !(x.chatId === chatId && x.msgId === msgId));
+  items.push({ chatId, msgId, queuedAt: Date.now() });
+  savePendingReactions(items);
+  console.log(`[auto-update] queued ✅ reaction chat=${chatId} msg=${msgId} (apply after restart)`);
+}
+
+/** Apply queued ✅ reactions after the runtime is fully back online.
+ * Called from runtimeManager once the new generation is running. */
+export async function flushPendingReactions(): Promise<void> {
+  const items = loadPendingReactions();
+  if (items.length === 0) return;
+  console.log(`[auto-update] flushing ${items.length} pending reaction(s)`);
+  const remaining: PendingReaction[] = [];
+  for (const item of items) {
+    // Drop stale entries (>24h): the commit notice is long gone.
+    if (Date.now() - item.queuedAt > 24 * 3600 * 1000) continue;
+    try {
+      const client = await getGlobalClient();
+      await client.sendReaction(item.chatId, item.msgId, [
+        new Api.ReactionEmoji({ emoticon: "✅" }),
+      ]);
+      console.log(`[auto-update] ✅ reaction applied chat=${item.chatId} msg=${item.msgId}`);
+    } catch (err: any) {
+      console.warn("[auto-update] pending reaction still failing:", err?.message || err);
+      remaining.push(item);
+    }
+  }
+  savePendingReactions(remaining);
+}
+
+// ── Auto-update for main repo ──────────────────────────────────────────
+/** React ✅ on GitHubBot commit message (success signal; no chat spam).
+ * Used by the plugin path (no restart) — retries to ride out reconnects. */
+async function reactSuccessOnGithubMsg(githubMsg: Api.Message): Promise<void> {
+  const peer = githubMsg.peerId ?? (githubMsg.chatId != null ? String(githubMsg.chatId) : undefined);
+  if (peer == null || githubMsg.id == null) return;
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    try {
+      const client = await getGlobalClient();
+      await client.sendReaction(peer, githubMsg.id, [
+        new Api.ReactionEmoji({ emoticon: "✅" }),
+      ]);
+      console.log(`[auto-update] ✅ reaction on msg ${githubMsg.id}`);
+      return;
+    } catch (e: any) {
+      console.warn(`[auto-update] ✅ reaction failed (attempt ${attempt}/3):`, e?.message || e);
+      if (attempt < 3) await new Promise((r) => setTimeout(r, 1500));
+    }
+  }
+}
+
+async function autoUpdateMainRepo(githubMsg: Api.Message): Promise<void> {
+  // Silent success path: no status replies. Errors only.
+  try {
     const branchInfo = await findMainBranch();
     if (!branchInfo) {
       throw new Error("未找到可用的远程分支");
@@ -201,32 +274,30 @@ async function autoUpdateMainRepo(githubMsg: Api.Message): Promise<void> {
 
     await gitExec(["fetch", "--all"]);
     await gitExec(["pull", remote, branch, "--no-rebase"]);
+
+    // Pull succeeded → update is on disk. But the process is about to restart
+    // (npm install blocks the event loop, then process.exit). Do NOT react now:
+    // ✅ should mean "已更新并完整重启上线", matching what the user sees after a
+    // manual update. Persist the intent; flushPendingReactions() re-applies it
+    // once the NEW runtime is fully online (see runtimeManager startup).
+    const peer = githubMsg.peerId ?? (githubMsg.chatId != null ? String(githubMsg.chatId) : undefined);
+    if (peer != null && githubMsg.id != null) {
+      queueReaction(String(peer), githubMsg.id);
+    }
+
     await npm_install_project_dependencies();
 
-    // Success — delete status message using a fresh client, then restart silently.
-    // statusMsg.delete() may fail because the client connection died during npm install.
-    await deleteStatusMessage(targetPeerId, targetMsgId);
     await executeAutoExit();
   } catch (error: any) {
     const errDetail = getErrorMessage(error);
-    if (statusMsg) {
-      try {
-        await statusMsg.edit({ text: `❌ 自动更新失败：${errDetail}` });
-      } catch (_) {}
-    } else {
-      try { await githubMsg.reply({ message: `❌ 自动更新失败：${errDetail}` }); } catch (_) {}
-    }
+    console.error("[auto-update] 主仓库更新失败:", errDetail);
+    try {
+      await githubMsg.reply({ message: `❌ 自动更新失败：${errDetail}` });
+    } catch (_) {}
   }
 }
 
-/**
- * Delete a status message using a fresh client — see
- * @utils/postReloadMessage.deleteStatusMessage.
- */
-
 async function executeAutoExit(): Promise<void> {
-  // Minimal restart: just exit the process. pm2 will restart it.
-  // No message tracking needed — we already deleted the status message.
   console.log("[auto-update] 更新完成，退出进程…");
   process.exit(0);
 }
@@ -234,37 +305,45 @@ async function executeAutoExit(): Promise<void> {
 // ── Auto-update for plugin repos ───────────────────────────────────────
 async function autoUpdatePlugins(githubMsg: Api.Message): Promise<void> {
   try {
-    const statusMsg = (await githubMsg.reply({ message: "🤖 自动更新：检测到插件仓库新提交，正在更新插件…" }))!;
-    // Snapshot before updateAllPlugins → reloadAndFinalize → loadPlugins()
-    // (plugin reload invalidates statusMsg's internal _client reference)
-    const fallbackPeerId = normalizeChatId(statusMsg) || statusMsg.peerId;
-    const fallbackMsgId = statusMsg.id;
-
-    const result = await updateAllPlugins(statusMsg);
+    // Silent: updateAllPlugins still needs a message object for internal edits.
+    // We pass githubMsg but use silent mode so it never posts progress to the group.
+    const result = await updateAllPlugins(githubMsg, { silent: true });
 
     if (result.failedCount === 0) {
-      const targetPeerId = result.statusPeerId ?? fallbackPeerId;
-      const targetMsgId = result.statusMsgId ?? fallbackMsgId;
-      await deleteStatusMessage(targetPeerId, targetMsgId);
+      await reactSuccessOnGithubMsg(githubMsg);
+      return;
     }
+    // Partial/full failure — surface error only
+    try {
+      await githubMsg.reply({
+        message: `❌ 插件自动更新失败：${result.failedCount} 个插件更新失败`,
+      });
+    } catch (_) {}
   } catch (error: any) {
-    console.error("[auto-update] 插件更新异常:", getErrorMessage(error));
+    const errDetail = getErrorMessage(error);
+    console.error("[auto-update] 插件更新异常:", errDetail);
+    try {
+      await githubMsg.reply({ message: `❌ 插件自动更新失败：${errDetail}` });
+    } catch (_) {}
   }
 }
 
 // ── GitHubBot message parsing ──────────────────────────────────────────
-// Channel: GitHub commit notifications (hardcoded product channel)
-const GITHUB_CHANNEL_ID = "-1003061608291";
-// GitHubBot user id (stable; username may be missing on live NewMessage events)
+// Product channel (legacy) + any group/channel where GitHubBot posts (e.g. telebox 群绑定)
+/** Legacy product channel (no longer required; any chat with GitHubBot works). */
+const _GITHUB_CHANNEL_ID_LEGACY = "-1003061608291";
+void _GITHUB_CHANNEL_ID_LEGACY;
 const GITHUB_BOT_USER_ID = "107550100";
 const GITHUB_BOT_USERNAME = "githubbot";
 
-// Real bot text (2026-07): "🔨 1 new commit to TeleBox:main:\n\n28d6511: …"
-// Also accept optional TeleBoxOrg/ prefix and legacy TeleBox_M names.
+// Classic edition only reacts to classic repos (not TeleBox-Next*).
+// Accept TeleBoxOrg / TeleBoxLabs / bare names. Plugin pattern first.
+// GitHubBot: "1 new commit to …" / "2 new commits to …" (singular or plural)
+const COMMIT_NOTICE_PATTERN = /\bnew\s+commits?\b/i;
 const MAIN_REPO_PATTERN =
-  /new commit[\s\S]*?to\s+(?:TeleBoxOrg\/)?(TeleBox|TeleBox_M|TeleBox-Next)\s*:\s*main/i;
+  /\bnew\s+commits?\b[\s\S]*?\bto\s+(?:(?:TeleBoxOrg|TeleBoxLabs)\/)?(TeleBox|TeleBox_M)\s*:\s*main\b/i;
 const PLUGIN_REPO_PATTERN =
-  /new commit[\s\S]*?to\s+(?:TeleBoxOrg\/)?(TeleBox_Plugins|TeleBox_M_Plugins|TeleBox-Next-Plugins|TeleBox-Next_Plugins)\s*:\s*main/i;
+  /\bnew\s+commits?\b[\s\S]*?\bto\s+(?:(?:TeleBoxOrg|TeleBoxLabs)\/)?(TeleBox-Plugins|TeleBox_Plugins|TeleBox_M_Plugins)\s*:\s*main\b/i;
 
 function normalizeChatId(msg: Api.Message): string {
   if (msg.chatId != null) return String(msg.chatId);
@@ -287,7 +366,6 @@ function isGitHubBot(msg: Api.Message): boolean {
     .toLowerCase()
     .replace(/^@/, "");
   if (uname === GITHUB_BOT_USERNAME) return true;
-  // fromId PeerUser fallback when sender entity not hydrated
   const from = msg.fromId as { userId?: { toString(): string } } | undefined;
   if (from?.userId != null && String(from.userId) === GITHUB_BOT_USER_ID) return true;
   return false;
@@ -303,12 +381,16 @@ class UpdatePlugin extends Plugin {
     update: async (msg) => {
       const parts = msg.message.slice(1).split(" ").slice(1);
 
-      // update auto on/off
       if (parts[0] === "auto") {
         const sub = parts[1]?.toLowerCase();
         if (sub === "on") {
           saveAutoUpdateState({ enabled: true });
-          await msg.edit({ text: "✅ 自动更新已开启\n\n检测到主仓库提交时自动 git pull + 重启，检测到插件仓库提交时自动 tpm update。" });
+          await msg.edit({
+            text:
+              "✅ 自动更新已开启\n\n" +
+              "任意会话中 GitHubBot 推送 Classic 仓库（TeleBox / TeleBox-Plugins，含 TeleBoxLabs 镜像）提交时自动更新。\n" +
+              "成功：仅在 commit 消息上 ✅；失败：回复错误。",
+          });
           return;
         }
         if (sub === "off") {
@@ -316,9 +398,10 @@ class UpdatePlugin extends Plugin {
           await msg.edit({ text: "🔒 自动更新已关闭" });
           return;
         }
-        // show status
         const state = loadAutoUpdateState();
-        await msg.edit({ text: `自动更新状态：${state.enabled ? "✅ 开启" : "🔒 关闭"}\n\n使用 <code>${mainPrefix}update auto on/off</code> 切换` });
+        await msg.edit({
+          text: `自动更新状态：${state.enabled ? "✅ 开启" : "🔒 关闭"}\n\n使用 <code>${mainPrefix}update auto on/off</code> 切换`,
+        });
         return;
       }
 
@@ -331,20 +414,19 @@ class UpdatePlugin extends Plugin {
     const state = loadAutoUpdateState();
     if (!state.enabled) return;
 
-    const chatId = normalizeChatId(msg);
-    if (chatId !== GITHUB_CHANNEL_ID) return;
-
+    // Any chat is OK (channel + 群绑定). Still require GitHubBot + commit text.
     if (!isGitHubBot(msg)) return;
 
     const text = msg.message || "";
-    if (!text || !/new commit/i.test(text)) return;
+    if (!text || !COMMIT_NOTICE_PATTERN.test(text)) return;
 
-    // Plugin repos first — "TeleBox_Plugins" also contains substring "TeleBox"
+    // Optional log for product channel vs group
+    const chatId = normalizeChatId(msg);
     if (PLUGIN_REPO_PATTERN.test(text)) {
-      console.log("[auto-update] 检测到插件仓库提交，开始自动更新插件…");
+      console.log(`[auto-update] chat=${chatId || "?"} 插件仓库提交 → silent update`);
       await autoUpdatePlugins(msg);
     } else if (MAIN_REPO_PATTERN.test(text)) {
-      console.log("[auto-update] 检测到主仓库提交，开始自动更新…");
+      console.log(`[auto-update] chat=${chatId || "?"} 主仓库提交 → silent update`);
       await autoUpdateMainRepo(msg);
     }
   };

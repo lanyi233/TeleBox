@@ -209,11 +209,12 @@ async function resolvePendingSwitchNotification(
     const label = currentVersion === "teleproto" ? "TeleBox Classic" : "TeleBox-Next";
     const other = currentVersion === "teleproto" ? "TeleBox-Next" : "TeleBox Classic";
     const summary = notification.summary ? `\n\n${notification.summary}` : "";
+    // Plain text — msg.edit often has no Markdown parseMode
     const text =
-      `🎉 **切换完成**\n\n` +
-      `现在运行：${icon} **${label}**` +
+      `🎉 切换完成\n\n` +
+      `现在运行：${icon} ${label}` +
       summary +
-      `\n\n再切回去：发 \`.switch go\`（会切到 ${other}）。`;
+      `\n\n再切回去：发 .switch go（会切到 ${other}）。`;
 
     await client.editMessage(notification.chatId, {
       message: notification.msgId,
@@ -245,6 +246,30 @@ async function startFreshRuntime(): Promise<TeleBoxRuntime> {
     // 切换后上线后，编辑之前留下的"正在切换…"通知消息
     await resolvePendingSwitchNotification(runtime.client, "teleproto");
     void flushPendingStatusDeletes().catch((e) => console.warn("[RUNTIME] pending status deletes:", e));
+    // Apply ✅ reactions queued by auto-update BEFORE the restart — now that the
+    // new runtime is fully online (equivalent to the manual-update summary).
+    void (async () => {
+      try {
+        const mod = require("../plugin/update") as {
+          flushPendingReactions?: () => Promise<void>;
+        };
+        await mod.flushPendingReactions?.();
+      } catch (e) {
+        console.warn("[RUNTIME] pending reactions:", e);
+      }
+    })();
+    // Resume autofix steps 4-5 (update plugins + summary) if a fix was in
+    // progress before the restart.
+    void (async () => {
+      try {
+        const mod = require("../plugin/autofix") as {
+          resumeAutofix?: () => Promise<void>;
+        };
+        await mod.resumeAutofix?.();
+      } catch (e) {
+        console.warn("[RUNTIME] resume autofix:", e);
+      }
+    })();
     runtime.state = "running";
     return runtime;
   } catch (error) {
