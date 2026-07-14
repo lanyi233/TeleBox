@@ -24,7 +24,7 @@ import {
   resolveRepoRoot,
   spawnTsxDetached,
 } from "@utils/versionSwitchPaths";
-import {
+import { markSwitchInProgress, clearSwitchInProgress, 
   resolveTeleprotoChatId,
   readProgressSnapshot,
   clearProgressSnapshot,
@@ -61,21 +61,21 @@ function hasTeleprotoNativeSession(): boolean {
 const T = {
   help: () =>
     [
-      `**🔄 版本切换**`,
+      `🔄 版本切换`,
       ``,
-      `在 **TeleBox Classic** 和 **TeleBox-Next** 之间切换。`,
-      `session 直接转换，**不用重新登录**。`,
+      `在 TeleBox Classic 和 TeleBox-Next 之间切换。`,
+      `session 直接转换，不用重新登录。`,
       `两版都放在原安装目录下：telebox/telebox-classic 与 telebox/telebox-next。`,
       ``,
-      `**两个子命令：**`,
+      `两个子命令：`,
       ``,
-      `**1. \`${mainPrefix}switch go\`**`,
-      `• 立刻切到**另一个**版本`,
+      `1. \`${mainPrefix}switch go\``,
+      `• 立刻切到另一个版本`,
       `• 自动：转换 session → 同步插件/配置 → 重启目标版本`,
       `• 另一边没有的插件会归档到本机，不会丢`,
       `• bot 会短暂离线几秒，完成后本条消息会更新`,
       ``,
-      `**2. \`${mainPrefix}switch status\`**`,
+      `2. \`${mainPrefix}switch status\``,
       `• 查看当前运行的是哪个版本`,
       `• 显示另一边版本名称`,
       `• 不切换，只看状态`,
@@ -87,10 +87,10 @@ const T = {
     const current = detectCurrentVersion();
     const other: TeleBoxVersion = current === "teleproto" ? "mtcute" : "teleproto";
     const lines = [
-      `**📊 版本状态**`,
+      `📊 版本状态`,
       ``,
-      `**当前运行：** ${EMOJI[current]} ${label(current)}`,
-      `**另一边：** ${EMOJI[other]} ${label(other)}`,
+      `当前运行： ${EMOJI[current]} ${label(current)}`,
+      `另一边： ${EMOJI[other]} ${label(other)}`,
       ``,
       `切过去：\`${mainPrefix}switch go\``,
       `再看状态：\`${mainPrefix}switch status\``,
@@ -106,9 +106,9 @@ const T = {
 
   goSwitching: (target: TeleBoxVersion) =>
     [
-      `🚀 **正在切换到 ${EMOJI[target]} ${label(target)}**`,
+      `🚀 正在切换到 ${EMOJI[target]} ${label(target)}`,
       ``,
-      `本条消息会**实时更新**每一步进度：`,
+      `本条消息会实时更新每一步进度：`,
       `• 准备目标版本（首次会下载依赖，可能较久）`,
       `• 转换 session / 同步插件 / 合并配置`,
       `• 停止当前版本 → 启动目标版本`,
@@ -172,8 +172,18 @@ function spawnController(source: TeleBoxVersion, target: TeleBoxVersion): void {
       /* ignore */
     }
   });
+  // Detach fully: parent must not wait, and PM2 must not track this tree.
   child.unref();
-  console.log(`[switch] controller spawned pid=${child.pid} log=${logPath}`);
+  try {
+    if (child.pid) {
+      fs.writeFileSync(
+        path.join(logDir, "controller.pid"),
+        String(child.pid),
+        { mode: 0o600 },
+      );
+    }
+  } catch { /* ignore */ }
+  console.log(`[switch] controller spawned pid=${child.pid} log=${logPath} (setsid/out-of-tree)`);
 }
 
 const plugin = new (class extends Plugin {
@@ -232,6 +242,7 @@ const plugin = new (class extends Plugin {
       return;
     }
     clearProgressSnapshot(DEFAULT_SWITCH_HOME);
+    markSwitchInProgress({ source: current, target, reason: "plugin-go" });
     state.pendingNotification = {
       chatId,
       msgId: msg.id,
@@ -244,9 +255,10 @@ const plugin = new (class extends Plugin {
       spawnController(current, target);
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : String(err);
+      clearSwitchInProgress();
       await msg.edit({
         text: [
-          `❌ **无法启动切换**`,
+          `❌ 无法启动切换`,
           ``,
           message,
           ``,

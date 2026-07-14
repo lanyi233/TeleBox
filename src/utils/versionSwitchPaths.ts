@@ -73,7 +73,7 @@ const MTCUTE_CLONE_URL = "https://github.com/TeleBoxOrg/TeleBox-Next.git";
 const TELEPROTO_PLUGIN_CLONE_URL =
   "https://github.com/TeleBoxOrg/TeleBox_Plugins.git";
 const MTCUTE_PLUGIN_CLONE_URL =
-  "https://github.com/TeleBoxOrg/TeleBox-Next_Plugins.git";
+  "https://github.com/TeleBoxOrg/TeleBox-Next-Plugins.git";
 
 const PATH_CACHE_FILE = path.join(DEFAULT_SWITCH_HOME, "paths.json");
 
@@ -82,11 +82,13 @@ const HOME_RESERVED = new Set([
   PEER_DIR_NAME.teleproto,
   PEER_DIR_NAME.mtcute,
   "TeleBox_Plugins",
-  "TeleBox-Next_Plugins",
-  "TeleBox-Next_Plugins",
+  "TeleBox-Next-Plugins",
+  "TeleBox-Next_Plugins", // legacy dir name after rebrand
+  "TeleBox_M_Plugins",
   "telebox_plugins",
   "telebox_m_plugins",
   "telebox-next_plugins",
+  "telebox-next-plugins",
 ]);
 
 interface PathCache {
@@ -700,7 +702,14 @@ export function resolvePluginIndexPath(version: TeleBoxVersion): string {
   const names =
     version === "teleproto"
       ? ["TeleBox_Plugins", "telebox_plugins"]
-      : ["TeleBox-Next_Plugins", "TeleBox-Next_Plugins", "telebox_m_plugins", "telebox-next_plugins"];
+      : [
+          "TeleBox-Next-Plugins",
+          "TeleBox-Next_Plugins", // legacy
+          "TeleBox_M_Plugins",
+          "telebox_m_plugins",
+          "telebox-next_plugins",
+          "telebox-next-plugins",
+        ];
 
   const candidates = [
     ...names.map((n) => path.join(home, n, "plugins.json")),
@@ -714,7 +723,7 @@ export function resolvePluginIndexPath(version: TeleBoxVersion): string {
   }
 
   const defaultName =
-    version === "teleproto" ? "TeleBox_Plugins" : "TeleBox-Next_Plugins";
+    version === "teleproto" ? "TeleBox_Plugins" : "TeleBox-Next-Plugins";
   const cloneTarget = path.join(home, defaultName);
   if (!fs.existsSync(cloneTarget)) {
     console.log(`[versionSwitch] 克隆插件索引 → ${cloneTarget}`);
@@ -777,6 +786,17 @@ export function spawnTsxSync(
   });
 }
 
+/**
+ * Spawn a long-running switch controller that MUST survive PM2 stop of the bot.
+ *
+ * Root cause of mid-switch freezes: Node `detached:true` alone does NOT remove
+ * the child from PM2's kill tree. When controller runs `pm2 stop telebox`, PM2
+ * kills the bot AND every descendant — including the controller. Progress then
+ * freezes around "合并插件配置" / "停止当前版本" with no further log lines.
+ *
+ * Fix: launch via `setsid` so the controller is a new session leader outside
+ * the bot process tree; unref the launcher handle.
+ */
 export function spawnTsxDetached(
   repoRoot: string,
   script: string,
@@ -787,25 +807,43 @@ export function spawnTsxDetached(
   if (!fs.existsSync(scriptPath)) {
     throw new Error(`脚本不存在: ${scriptPath}`);
   }
-  const child = spawn(process.execPath, [cli, scriptPath], {
-    cwd: options.cwd ?? repoRoot,
-    env: options.env ?? process.env,
-    stdio: options.stdio ?? "ignore",
-    detached: options.detached ?? true,
-  });
+  const node = process.execPath;
+  const cwd = options.cwd ?? repoRoot;
+  const env = options.env ?? process.env;
+  const stdio = options.stdio ?? "ignore";
+  const args = [cli, scriptPath];
+
+  const spawnNode = (): ChildProcess =>
+    spawn(node, args, {
+      cwd,
+      env,
+      stdio,
+      detached: true,
+    });
+
+  // setsid: new session → not in PM2 kill tree of the source bot
+  let child: ChildProcess;
+  if (fs.existsSync("/usr/bin/setsid") || fs.existsSync("/bin/setsid")) {
+    const setsidBin = fs.existsSync("/usr/bin/setsid") ? "/usr/bin/setsid" : "/bin/setsid";
+    child = spawn(setsidBin, [node, ...args], {
+      cwd,
+      env,
+      stdio,
+      detached: true,
+    });
+  } else {
+    child = spawnNode();
+  }
+
   child.on("error", (err: Error) => {
     console.error(
-      `[versionSwitch] failed to spawn ${scriptPath} via ${cli}:`,
+      `[versionSwitch] failed to spawn ${scriptPath}:`,
       err.message,
     );
   });
   return child;
 }
 
-/**
- * PM2 process names. Active bot uses edition-specific name so both can exist
- * with correct --cwd under the nested layout.
- */
 export const PM2_PROCESS_NAMES: Record<TeleBoxVersion, string> = {
   teleproto: "telebox",
   mtcute: "telebox-next",
