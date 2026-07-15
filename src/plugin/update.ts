@@ -177,13 +177,21 @@ async function update(force = false, msg: Api.Message) {
   }
 }
 
-// ── Pending reaction: apply ✅ only AFTER the process fully restarts ─────
+// ── Pending reaction: apply only AFTER the process fully restarts ───────
 // The main-repo path restarts the process (npm install + exit). Reacting
-// before exit lands ✅ while the OLD code is still (barely) running and the
+// before exit lands while the OLD code is still (barely) running and the
 // connection is being torn down. Instead we persist the intent and re-apply
 // it once the NEW runtime is fully online — the moment equivalent to seeing
 // the manual-update "已完成" summary.
+//
+// Root-cause notes (from production logs):
+// 1) Never queue String(msg.peerId): PeerChannel/etc becomes "[object Object]"
+//    and flush fails with "Cannot find any entity corresponding to ...".
+//    Always persist normalizeChatId(msg) (e.g. -100xxxxxxxx).
+// 2) Prefer ❤ (API form of ❤️); fall back to 👍 if the pack disallows it.
 const PENDING_REACTION_FILE = path.join(os.homedir(), ".telebox", "pending_reactions.json");
+/** Prefer ❤️; keep common defaults as fallback for restricted packs. */
+const SUCCESS_REACTION_EMOJIS = ["❤", "❤️", "👍"] as const;
 
 interface PendingReaction {
   chatId: string;
@@ -191,11 +199,20 @@ interface PendingReaction {
   queuedAt: number;
 }
 
+function isUsableChatId(chatId: string): boolean {
+  if (!chatId) return false;
+  // Bad historical queues from String(peerId object)
+  if (chatId === "[object Object]" || chatId === "undefined" || chatId === "null") return false;
+  return true;
+}
+
 function loadPendingReactions(): PendingReaction[] {
   try {
     if (!fs.existsSync(PENDING_REACTION_FILE)) return [];
     const raw = JSON.parse(fs.readFileSync(PENDING_REACTION_FILE, "utf8"));
-    return Array.isArray(raw) ? (raw as PendingReaction[]) : [];
+    if (!Array.isArray(raw)) return [];
+    // Drop unusable chatIds so they do not retry forever after every restart
+    return (raw as PendingReaction[]).filter((x) => isUsableChatId(String(x?.chatId ?? "")));
   } catch {
     return [];
   }
@@ -211,14 +228,51 @@ function savePendingReactions(items: PendingReaction[]): void {
 }
 
 function queueReaction(chatId: string, msgId: number): void {
-  if (!chatId || !msgId) return;
+  if (!isUsableChatId(chatId) || !msgId) return;
   const items = loadPendingReactions().filter((x) => !(x.chatId === chatId && x.msgId === msgId));
   items.push({ chatId, msgId, queuedAt: Date.now() });
   savePendingReactions(items);
-  console.log(`[auto-update] queued ✅ reaction chat=${chatId} msg=${msgId} (apply after restart)`);
+  console.log(`[auto-update] queued reaction chat=${chatId} msg=${msgId} (apply after restart)`);
 }
 
-/** Apply queued ✅ reactions after the runtime is fully back online.
+function isReactionInvalidError(err: any): boolean {
+  const m = String(err?.message || err || "");
+  return /REACTION_INVALID|reaction is invalid|specified reaction is invalid/i.test(m);
+}
+
+/** Send a success reaction with emoji fallback for restricted groups. */
+async function sendSuccessReaction(entity: any, msgId: number): Promise<string> {
+  const client = await getGlobalClient();
+  let lastErr: any;
+  for (const emoticon of SUCCESS_REACTION_EMOJIS) {
+    try {
+      await client.sendReaction(entity, msgId, [new Api.ReactionEmoji({ emoticon })]);
+      return emoticon;
+    } catch (e: any) {
+      lastErr = e;
+      if (isReactionInvalidError(e)) continue;
+      throw e;
+    }
+  }
+  throw lastErr;
+}
+
+/** Prefer live InputPeer from the message; fall back to persisted chat id. */
+async function resolveReactionEntity(githubMsg?: Api.Message, chatId?: string): Promise<any> {
+  if (githubMsg) {
+    try {
+      const input = await (githubMsg as any).getInputChat?.();
+      if (input) return input;
+    } catch (_) {}
+    if ((githubMsg as any).peerId) return (githubMsg as any).peerId;
+    const live = normalizeChatId(githubMsg);
+    if (isUsableChatId(live)) return live;
+  }
+  if (chatId && isUsableChatId(chatId)) return chatId;
+  throw new Error(`invalid reaction entity chatId=${chatId}`);
+}
+
+/** Apply queued reactions after the runtime is fully back online.
  * Called from runtimeManager once the new generation is running. */
 export async function flushPendingReactions(): Promise<void> {
   const items = loadPendingReactions();
@@ -228,14 +282,19 @@ export async function flushPendingReactions(): Promise<void> {
   for (const item of items) {
     // Drop stale entries (>24h): the commit notice is long gone.
     if (Date.now() - item.queuedAt > 24 * 3600 * 1000) continue;
+    if (!isUsableChatId(item.chatId)) continue;
     try {
-      const client = await getGlobalClient();
-      await client.sendReaction(item.chatId, item.msgId, [
-        new Api.ReactionEmoji({ emoticon: "✅" }),
-      ]);
-      console.log(`[auto-update] ✅ reaction applied chat=${item.chatId} msg=${item.msgId}`);
+      const entity = await resolveReactionEntity(undefined, item.chatId);
+      const used = await sendSuccessReaction(entity, item.msgId);
+      console.log(`[auto-update] reaction ${used} applied chat=${item.chatId} msg=${item.msgId}`);
     } catch (err: any) {
       console.warn("[auto-update] pending reaction still failing:", err?.message || err);
+      // Permanent entity/reaction failures: do not requeue forever
+      const m = String(err?.message || err || "");
+      if (/Cannot find any entity|No user has|PEER_ID_INVALID|CHAT_ID_INVALID|invalid reaction entity/i.test(m)) {
+        continue;
+      }
+      if (isReactionInvalidError(err)) continue;
       remaining.push(item);
     }
   }
@@ -243,21 +302,37 @@ export async function flushPendingReactions(): Promise<void> {
 }
 
 // ── Auto-update for main repo ──────────────────────────────────────────
-/** React ✅ on GitHubBot commit message (success signal; no chat spam).
- * Used by the plugin path (no restart) — retries to ride out reconnects. */
-async function reactSuccessOnGithubMsg(githubMsg: Api.Message): Promise<void> {
-  const peer = githubMsg.peerId ?? (githubMsg.chatId != null ? String(githubMsg.chatId) : undefined);
-  if (peer == null || githubMsg.id == null) return;
+/**
+ * React on GitHubBot commit message after update finishes (success signal).
+ * Plugin path must capture entity/chatId BEFORE loadPlugins()/reloadRuntime(),
+ * otherwise the old message client/entity cache is gone and reaction silently fails.
+ */
+async function reactSuccessOnGithubMsg(
+  githubMsg: Api.Message,
+  prefetched?: { entity?: any; chatId?: string; msgId?: number },
+): Promise<void> {
+  const msgId = prefetched?.msgId ?? githubMsg.id;
+  if (msgId == null) return;
   for (let attempt = 1; attempt <= 3; attempt++) {
     try {
-      const client = await getGlobalClient();
-      await client.sendReaction(peer, githubMsg.id, [
-        new Api.ReactionEmoji({ emoticon: "✅" }),
-      ]);
-      console.log(`[auto-update] ✅ reaction on msg ${githubMsg.id}`);
+      let entity = prefetched?.entity;
+      if (entity == null) {
+        entity = await resolveReactionEntity(
+          githubMsg,
+          prefetched?.chatId ?? normalizeChatId(githubMsg),
+        );
+      }
+      const used = await sendSuccessReaction(entity, msgId);
+      console.log(`[auto-update] reaction ${used} on msg ${msgId}`);
       return;
     } catch (e: any) {
-      console.warn(`[auto-update] ✅ reaction failed (attempt ${attempt}/3):`, e?.message || e);
+      console.warn(`[auto-update] reaction failed (attempt ${attempt}/3):`, e?.message || e);
+      // Prefetched InputPeer may be enough; if it failed, retry with chatId string
+      if (attempt === 2 && prefetched?.entity != null && prefetched?.chatId) {
+        try {
+          prefetched = { ...prefetched, entity: prefetched.chatId };
+        } catch (_) {}
+      }
       if (attempt < 3) await new Promise((r) => setTimeout(r, 1500));
     }
   }
@@ -280,9 +355,10 @@ async function autoUpdateMainRepo(githubMsg: Api.Message): Promise<void> {
     // ✅ should mean "已更新并完整重启上线", matching what the user sees after a
     // manual update. Persist the intent; flushPendingReactions() re-applies it
     // once the NEW runtime is fully online (see runtimeManager startup).
-    const peer = githubMsg.peerId ?? (githubMsg.chatId != null ? String(githubMsg.chatId) : undefined);
-    if (peer != null && githubMsg.id != null) {
-      queueReaction(String(peer), githubMsg.id);
+    // MUST use normalizeChatId — String(peerId) becomes "[object Object]" and never flushes.
+    const chatId = normalizeChatId(githubMsg);
+    if (chatId && githubMsg.id != null) {
+      queueReaction(chatId, githubMsg.id);
     }
 
     await npm_install_project_dependencies();
@@ -304,13 +380,29 @@ async function executeAutoExit(): Promise<void> {
 
 // ── Auto-update for plugin repos ───────────────────────────────────────
 async function autoUpdatePlugins(githubMsg: Api.Message): Promise<void> {
+  // Capture peer BEFORE updateAllPlugins → silent loadPlugins() → reloadRuntime().
+  // Reaction still runs AFTER the update finishes; only the entity is prefetched.
+  const chatId = normalizeChatId(githubMsg);
+  const msgId = githubMsg.id;
+  let entity: any;
+  try {
+    entity = await (githubMsg as any).getInputChat?.();
+  } catch (_) {}
+  if (entity == null && (githubMsg as any).peerId) {
+    entity = (githubMsg as any).peerId;
+  }
+  if (entity == null && isUsableChatId(chatId)) {
+    entity = chatId;
+  }
+
   try {
     // Silent: updateAllPlugins still needs a message object for internal edits.
     // We pass githubMsg but use silent mode so it never posts progress to the group.
     const result = await updateAllPlugins(githubMsg, { silent: true });
 
     if (result.failedCount === 0) {
-      await reactSuccessOnGithubMsg(githubMsg);
+      // After files updated + plugins reloaded — then react.
+      await reactSuccessOnGithubMsg(githubMsg, { entity, chatId, msgId });
       return;
     }
     // Partial/full failure — surface error only
@@ -336,7 +428,7 @@ void _GITHUB_CHANNEL_ID_LEGACY;
 const GITHUB_BOT_USER_ID = "107550100";
 const GITHUB_BOT_USERNAME = "githubbot";
 
-// Classic edition only reacts to classic repos (not TeleBox-Next*).
+// TeleBox edition only reacts to TeleBox repos (not TeleBox-Next*).
 // Accept TeleBoxOrg / TeleBoxLabs / bare names. Plugin pattern first.
 // GitHubBot: "1 new commit to …" / "2 new commits to …" (singular or plural)
 const COMMIT_NOTICE_PATTERN = /\bnew\s+commits?\b/i;
@@ -388,8 +480,8 @@ class UpdatePlugin extends Plugin {
           await msg.edit({
             text:
               "✅ 自动更新已开启\n\n" +
-              "任意会话中 GitHubBot 推送 Classic 仓库（TeleBox / TeleBox-Plugins，含 TeleBoxLabs 镜像）提交时自动更新。\n" +
-              "成功：仅在 commit 消息上 ✅；失败：回复错误。",
+              "任意会话中 GitHubBot 推送 TeleBox 仓库（TeleBox / TeleBox-Plugins，含 TeleBoxLabs 镜像）提交时自动更新。\n" +
+              "成功：仅在 commit 消息上 ❤️；失败：回复错误。",
           });
           return;
         }

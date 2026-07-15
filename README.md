@@ -1,5 +1,7 @@
 <div align="center">
 
+<img src="logo-circle.png" alt="TeleBox" width="120" height="120" />
+
 # 🚀 TeleBox
 
 [![License](https://img.shields.io/badge/License-LGPL%202.1-blue.svg?style=for-the-badge)](LICENSE)
@@ -46,7 +48,7 @@ _TypeScript 全栈 · 插件热加载 · 一键扩展 · 可与 TeleBox-Next 无
 sudo / sure，把能力安全分享给协作者
 
 🔀 **版本切换**  
-`.switch go` 在 Classic 与 Next 之间直切，会话与插件配置一并迁移
+`.switch go` 在 TeleBox 与 Next 之间直切，会话与插件配置一并迁移
 
 </td>
 <td width="33%">
@@ -75,9 +77,9 @@ sudo / sure，把能力安全分享给协作者
 📦 TeleBox/
 ├── 🎯 src/
 │   ├── 🚪 index.ts              # 入口
-│   ├── 🔌 plugin/               # 内置系统插件（22 个）
+│   ├── 🔌 plugin/               # 内置系统插件（24 个）
 │   │   ├── help.ts · tpm.ts · update.ts · switch.ts · autofix.ts
-│   │   ├── status.ts · ping.ts · reload.ts · exec.ts · sudo.ts
+│   │   ├── status.ts · ping.ts · reload.ts · health.ts · exec.ts · sudo.ts
 │   │   └── …
 │   ├── 🛠️ utils/                # 运行时 / 插件管理 / 会话 / 日志
 │   └── 🪝 hook/                 # 客户端补丁与类型增强
@@ -133,9 +135,10 @@ abstract class Plugin {
 <tr><td><strong>help</strong></td><td><code>help</code>, <code>h</code></td><td>帮助与命令列表</td></tr>
 <tr><td><strong>tpm</strong></td><td><code>tpm</code></td><td>插件管理器：搜索 / 安装 / 卸载 / 更新 / 上传</td></tr>
 <tr><td><strong>update</strong></td><td><code>update</code></td><td>拉取主仓最新代码并安装依赖</td></tr>
-<tr><td><strong>switch</strong></td><td><code>switch</code></td><td>Classic ↔ Next 版本切换（会话转换 + 配置迁移）</td></tr>
+<tr><td><strong>switch</strong></td><td><code>switch</code></td><td>TeleBox ↔ Next 版本切换（会话转换 + 配置迁移）</td></tr>
 <tr><td><strong>autofix</strong></td><td><code>autofix</code></td><td>一键修复：清重名插件 → 硬同步 → 重启 → 更新插件</td></tr>
-<tr><td><strong>reload</strong></td><td><code>reload</code>, <code>exit</code>, <code>restart</code>, <code>health</code>, <code>memory</code>…</td><td>重载 / 退出 / 健康与内存检查</td></tr>
+<tr><td><strong>reload</strong></td><td><code>reload</code>, <code>exit</code>, <code>restart</code>, <code>pmr</code></td><td>插件重载 / 退出 / PM2 重启</td></tr>
+<tr><td><strong>health</strong></td><td><code>health</code>, <code>memory</code></td><td>内存守护：看占用、开自动保护，偏高时尽量不打断任务再清理</td></tr>
 <tr><td><strong>status</strong></td><td><code>status</code>, <code>sysinfo</code></td><td>运行状态与系统信息</td></tr>
 <tr><td><strong>version</strong></td><td><code>version</code>, <code>ver</code></td><td>版本号与更新状态</td></tr>
 <tr><td><strong>ping</strong></td><td><code>ping</code></td><td>API / 目标 / DC 延迟探测（TCP 优先）</td></tr>
@@ -152,6 +155,7 @@ abstract class Plugin {
 <tr><td><strong>save</strong></td><td><code>save</code></td><td>会话 / 配置保存相关</td></tr>
 <tr><td><strong>leech</strong></td><td><code>leech</code></td><td>历史消息抓取与归档</td></tr>
 <tr><td><strong>agent</strong></td><td><code>agent</code></td><td>内置 Agent 能力</td></tr>
+<tr><td><strong>kitt</strong></td><td><code>kitt</code></td><td>高级触发器：匹配 → 执行（系统插件）</td></tr>
 </tbody>
 </table>
 
@@ -220,7 +224,7 @@ npm run dev   # 开发模式，前缀改为 ! / ！
 
 | | |
 |:--:|:--:|
-| [![TeleBox](https://img.shields.io/badge/📦_TeleBox-Classic-blue?style=for-the-badge&logo=github)](https://github.com/TeleBoxOrg/TeleBox) | [![TeleBox-Next](https://img.shields.io/badge/📦_TeleBox--Next-blue?style=for-the-badge&logo=github)](https://github.com/TeleBoxOrg/TeleBox-Next) |
+| [![TeleBox](https://img.shields.io/badge/📦_TeleBox-blue?style=for-the-badge&logo=github)](https://github.com/TeleBoxOrg/TeleBox) | [![TeleBox-Next](https://img.shields.io/badge/📦_TeleBox--Next-blue?style=for-the-badge&logo=github)](https://github.com/TeleBoxOrg/TeleBox-Next) |
 | [![Plugins](https://img.shields.io/badge/🔌_TeleBox--Plugins-green?style=for-the-badge&logo=github)](https://github.com/TeleBoxOrg/TeleBox-Plugins) | [![Issues](https://img.shields.io/badge/🆘_Issues-red?style=for-the-badge&logo=github)](https://github.com/TeleBoxOrg/TeleBox/issues) |
 
 <div align="center">
