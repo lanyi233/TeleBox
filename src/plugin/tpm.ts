@@ -12,6 +12,7 @@ import { JSONFilePreset } from "lowdb/node";
 import { getPrefixes } from "@utils/pluginManager";
 import { tryGetCurrentGenerationContext } from "@utils/runtimeManager";
 import { htmlEscape } from "@utils/htmlEscape";
+import { createHash } from "crypto";
 import {
   sendOrEditMessage,
   reloadAndFinalize,
@@ -38,6 +39,8 @@ interface PluginRecord {
   url: string;
   desc?: string;
   _updatedAt: number;
+  /** sha256 of content last written by TPM install/update; used to detect local edits */
+  _contentHash?: string;
 }
 
 type Database = Record<string, PluginRecord>;
@@ -161,6 +164,29 @@ function codeTag(value: string): string {
   return `<code>${htmlEscape(value)}</code>`;
 }
 
+function hashPluginContent(content: string): string {
+  return createHash("sha256").update(content, "utf8").digest("hex");
+}
+
+function isLocallyModifiedPlugin(
+  filePath: string,
+  currentContent: string,
+  record: PluginRecord,
+): boolean {
+  const localHash = hashPluginContent(currentContent);
+  if (record._contentHash) {
+    return localHash !== record._contentHash;
+  }
+  // Legacy records without hash: treat mtime newer than last TPM write as local edit
+  try {
+    const mtimeMs = fs.statSync(filePath).mtimeMs;
+    const updatedAt = record._updatedAt || 0;
+    return mtimeMs > updatedAt + 2000;
+  } catch {
+    return false;
+  }
+}
+
 /**
  * 在调用 loadPlugins() 之后写最终状态消息。
  * 委托 @utils/postReloadMessage.reloadAndFinalize：
@@ -241,8 +267,20 @@ async function sendLongMessage(
     linkPreview: options?.linkPreview !== false,
   };
 
-  // Append footer to the first message so it always appears at the bottom of the main output
-  const firstMessage = footer ? `${messages[0]}\n${footer}` : messages[0];
+  // Footer must go on the LAST part. Appending to part[0] overflows Telegram's
+  // 4096 limit when the body already spans multiple messages, so the repo link
+  // (and totals) get truncated / never reach the user-visible last bubble.
+  if (footer) {
+    const lastIdx = messages.length - 1;
+    const candidate = `${messages[lastIdx]}\n${footer}`;
+    if (candidate.length <= MAX_MESSAGE_LENGTH) {
+      messages[lastIdx] = candidate;
+    } else {
+      messages.push(footer.replace(/^\n+/, ""));
+    }
+  }
+
+  const firstMessage = messages[0];
 
   if (isEdit) {
     try {
@@ -322,6 +360,9 @@ async function rebuildPluginDb(db: Awaited<ReturnType<typeof getDatabase>>): Pro
         url: entry.url,
         desc: entry.desc || oldData[name]?.desc || "暂无描述",
         _updatedAt: oldData[name]?._updatedAt || now,
+        ...(oldData[name]?._contentHash
+          ? { _contentHash: oldData[name]._contentHash }
+          : {}),
       };
     } else if (oldData[name]) {
       // local plugin has no remote match — keep old record
@@ -473,7 +514,7 @@ async function installRemotePlugin(plugin: string, msg: Api.Message) {
 
     try {
       const db = await getDatabase();
-      db.data[plugin] = { ...mergedCatalog[plugin], _updatedAt: Date.now() };
+      db.data[plugin] = { ...mergedCatalog[plugin], _updatedAt: Date.now(), _contentHash: hashPluginContent(response.data) };
       await db.write();
       console.log(`[TPM] 已记录插件信息到数据库: ${plugin}`);
     } catch (error) {
@@ -562,6 +603,7 @@ async function installAllPlugins(msg: Api.Message) {
             url: pluginUrl,
             desc: pluginData.desc,
             _updatedAt: Date.now(),
+            _contentHash: hashPluginContent(response.data),
           };
           await db.write();
           console.log(`[TPM] 已记录插件信息到数据库: ${plugin}`);
@@ -685,6 +727,7 @@ async function installMultiplePlugins(pluginNames: string[], msg: Api.Message) {
             url: pluginUrl,
             desc: pluginData.desc,
             _updatedAt: Date.now(),
+            _contentHash: hashPluginContent(response.data),
           };
           await db.write();
           console.log(`[TPM] 已记录插件信息到数据库: ${pluginName}`);
@@ -1321,9 +1364,10 @@ async function showPluginRecords(msg: Api.Message, verbose?: boolean) {
 
 export async function updateAllPlugins(
   msg: Api.Message,
-  opts?: { silent?: boolean },
+  opts?: { silent?: boolean; force?: boolean },
 ): Promise<{ failedCount: number; statusPeerId?: any; statusMsgId?: number }> {
   const silent = !!opts?.silent;
+  const force = !!opts?.force;
   // silent: skip all progress UI (auto-update path); still need msg for reload peer if any
   let statusMsg: Api.Message = msg;
   let canEdit = !silent;
@@ -1352,6 +1396,7 @@ export async function updateAllPlugins(
     let updatedCount = 0;
     let failedCount = 0;
     let skipCount = 0;
+    let localModifiedCount = 0;
     const failedPlugins: string[] = [];
 
     if (canEdit) {
@@ -1368,7 +1413,7 @@ export async function updateAllPlugins(
         if (canEdit && ([0, dbPlugins.length - 1].includes(i) || i % 2 === 0)) {
           canEdit = await updateProgressMessage(statusMsg, `📦 正在更新插件: ${codeTag(pluginName)}\n\n${progressBar}\n🔄 进度: ${
               i + 1
-            }/${totalPlugins} (${progress}%)\n✅ 成功: ${updatedCount}\n⏭️ 跳过: ${skipCount}\n❌ 失败: ${failedCount}`, { parseMode: "html" });
+            }/${totalPlugins} (${progress}%)\n✅ 成功: ${updatedCount}\n⏭️ 跳过: ${skipCount}\n🛡 本地已改: ${localModifiedCount}\n❌ 失败: ${failedCount}`, { parseMode: "html" });
         }
 
         if (!pluginRecord.url) {
@@ -1396,9 +1441,28 @@ export async function updateAllPlugins(
         }
 
         const currentContent = fs.readFileSync(filePath, "utf8");
-        if (currentContent === response.data) {
+        const remoteContent = response.data;
+        const localHash = hashPluginContent(currentContent);
+        const remoteHash = hashPluginContent(remoteContent);
+
+        if (localHash === remoteHash) {
+          if (pluginRecord._contentHash !== localHash) {
+            try {
+              db.data[pluginName]._contentHash = localHash;
+              await db.write();
+            } catch (dbError) {
+              console.error(`[TPM] 同步插件 hash 失败: ${dbError}`);
+            }
+          }
           skipCount++;
           console.log(`[TPM] 跳过更新插件 ${pluginName}: 内容无变化`);
+          continue;
+        }
+
+        if (!force && isLocallyModifiedPlugin(filePath, currentContent, pluginRecord)) {
+          localModifiedCount++;
+          skipCount++;
+          console.log(`[TPM] 跳过更新插件 ${pluginName}: 检测到本地修改，保留本地版本`);
           continue;
         }
 
@@ -1411,10 +1475,11 @@ export async function updateAllPlugins(
         fs.copyFileSync(filePath, backupPath);
         console.log(`[TPM] 旧版本已备份到: ${backupPath}`);
 
-        fs.writeFileSync(filePath, response.data);
+        fs.writeFileSync(filePath, remoteContent);
 
         try {
           db.data[pluginName]._updatedAt = Date.now();
+          db.data[pluginName]._contentHash = remoteHash;
           await db.write();
           console.log(`[TPM] 已更新插件数据库记录: ${pluginName}`);
         } catch (dbError) {
@@ -1440,7 +1505,11 @@ export async function updateAllPlugins(
       return { failedCount: 0, statusPeerId: skipPeerId, statusMsgId: skipMsgId };
     }
 
-    const finalText = `✅ 更新完成 (成功${updatedCount}个, 跳过${skipCount}个, 失败${failedCount}个)`;
+    const localModTip =
+      localModifiedCount > 0
+        ? `\n🛡 本地已改保留 ${localModifiedCount} 个（未覆盖）\n💡 强制覆盖: <code>${mainPrefix}tpm update -f</code>`
+        : "";
+    const finalText = `✅ 更新完成 (成功${updatedCount}个, 跳过${skipCount}个, 失败${failedCount}个)${localModTip}`;
     const statusPeerId =
       statusMsg.chatId != null ? String(statusMsg.chatId) : statusMsg.peerId;
     const statusMsgId = statusMsg.id;
@@ -1456,7 +1525,7 @@ export async function updateAllPlugins(
     } else {
       await reloadAndFinalize(statusMsg, finalText, { parseMode: "html" });
     }
-    console.log(`[TPM] 更新完成。统计: 成功${updatedCount}个, 跳过${skipCount}个, 失败${failedCount}个`);
+    console.log(`[TPM] 更新完成。统计: 成功${updatedCount}个, 跳过${skipCount}个, 本地已改${localModifiedCount}个, 失败${failedCount}个`);
     return { failedCount, statusPeerId, statusMsgId };
   } catch (error) {
     console.error("[TPM] 一键更新失败:", error);
@@ -1609,7 +1678,9 @@ class TpmPlugin extends Plugin {
           ["-v", "--verbose"].includes(args[1]) || cmd === "lv"
         );
       } else if (cmd === "update" || cmd === "updateAll" || cmd === "ua") {
-        await updateAllPlugins(msg);
+        // Parse force flag
+        const force = args.includes("-f") || args.includes("--force");
+        await updateAllPlugins(msg, { force });
       } else if (cmd === "source") {
         await handleSourceCommand(args, msg);
       } else {
