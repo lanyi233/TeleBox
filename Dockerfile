@@ -1,12 +1,12 @@
 # --- 第一阶段：构建 ---
-FROM node:24-bullseye-slim AS builder
+FROM node:24-bookworm-slim AS builder
 
 RUN echo ":: Testing APT..." && \
     if node -e "const net = require('net'); const client = net.createConnection({ port: 53, host: '8.8.8.8', timeout: 2000 }, () => { process.exit(0); }); client.on('error', () => { process.exit(1); }); client.on('timeout', () => { process.exit(1); });"; then \
         echo " -> Global" ; \
     else \
         echo " -> China" ; \
-        printf "deb https://mirrors.ustc.edu.cn/debian/ bullseye main contrib non-free\ndeb https://mirrors.ustc.edu.cn/debian/ bullseye-updates main contrib non-free\ndeb https://mirrors.ustc.edu.cn/debian-security bullseye-security main contrib non-free" > /etc/apt/sources.list; \
+        printf "deb https://mirrors.ustc.edu.cn/debian/ bookworm main contrib non-free non-free-firmware\ndeb https://mirrors.ustc.edu.cn/debian/ bookworm-updates main contrib non-free non-free-firmware\ndeb https://mirrors.ustc.edu.cn/debian-security bookworm-security main contrib non-free non-free-firmware" > /etc/apt/sources.list; \
     fi && \
     apt-get update && apt-get install -y \
     python3 make g++ curl git \
@@ -28,14 +28,14 @@ RUN echo ":: Testing npm..." && \
 COPY . .
 
 # --- 第二阶段：运行 ---
-FROM node:24-bullseye-slim
+FROM node:24-bookworm-slim
 
 RUN echo ":: Testing APT..." && \
     if node -e "const net = require('net'); const client = net.createConnection({ port: 53, host: '8.8.8.8', timeout: 2000 }, () => { process.exit(0); }); client.on('error', () => { process.exit(1); }); client.on('timeout', () => { process.exit(1); });"; then \
         echo " -> Global" ; \
     else \
         echo " -> China" ; \
-        printf "deb https://mirrors.ustc.edu.cn/debian/ bullseye main contrib non-free\ndeb https://mirrors.ustc.edu.cn/debian/ bullseye-updates main contrib non-free\ndeb https://mirrors.ustc.edu.cn/debian-security bullseye-security main contrib non-free" > /etc/apt/sources.list; \
+        printf "deb https://mirrors.ustc.edu.cn/debian/ bookworm main contrib non-free non-free-firmware\ndeb https://mirrors.ustc.edu.cn/debian/ bookworm-updates main contrib non-free non-free-firmware\ndeb https://mirrors.ustc.edu.cn/debian-security bookworm-security main contrib non-free non-free-firmware" > /etc/apt/sources.list; \
     fi && \
     apt-get update && apt-get install -y \
     ca-certificates \
