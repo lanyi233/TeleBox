@@ -1,5 +1,5 @@
 #!/bin/bash
-
+set -euo pipefail
 if ! [ "$(uname)" == "Linux" ]; then
     echo "不支持的操作系统: $(uname)"
     exit 1
@@ -19,31 +19,30 @@ do_logs(){
     docker compose logs -f
 }
 do_update(){
-    docker compose pull
-    do_restart
+    docker compose pull && do_restart
 }
 
 case $1 in
-    start|s|up)
+    start|up)
         do_start
         ;;
-    stop|s|down)
+    stop|down)
         do_stop
         ;;
-    restart|r)
+    restart)
         do_restart
         ;;
-    logs|l)
+    logs)
         do_logs
         ;;
-    update|u)
+    update|up)
         do_update
         ;;
-    login|l)
+    login)
         echo ":: 登录完成后按下 Ctrl+C 以退出登录流程"
         echo ":: 执行 $0 start 启动"
-        touch .env config.json
-        mkdir plugins assets
+        touch .env config.json 
+        mkdir -p plugins assets
         docker compose run -it --rm telebox
         ;;
     *)
