@@ -1,12 +1,13 @@
 # --- 第一阶段：构建 ---
 FROM node:24-bookworm-slim AS builder
 
-RUN echo ":: Testing APT..." && \
+RUN echo ":: Testing apt ..." && \
     if node -e "const net = require('net'); const client = net.createConnection({ port: 53, host: '8.8.8.8', timeout: 2000 }, () => { process.exit(0); }); client.on('error', () => { process.exit(1); }); client.on('timeout', () => { process.exit(1); });"; then \
         echo " -> Global" ; \
     else \
         echo " -> China" ; \
-        printf "deb https://mirrors.ustc.edu.cn/debian/ bookworm main contrib non-free non-free-firmware\ndeb https://mirrors.ustc.edu.cn/debian/ bookworm-updates main contrib non-free non-free-firmware\ndeb https://mirrors.ustc.edu.cn/debian-security bookworm-security main contrib non-free non-free-firmware" > /etc/apt/sources.list; \
+        # Thanks https://github.com/mirrorz-org
+        printf "deb https://mirrors.cernet.edu.cn/debian/ bookworm main contrib non-free non-free-firmware\ndeb https://mirrors.cernet.edu.cn/debian/ bookworm-updates main contrib non-free non-free-firmware\ndeb https://mirrors.cernet.edu.cn/debian-security bookworm-security main contrib non-free non-free-firmware" > /etc/apt/sources.list; \
     fi && \
     apt-get update && apt-get install -y \
     python3 make g++ curl git \
@@ -15,11 +16,12 @@ RUN echo ":: Testing APT..." && \
 WORKDIR /app
 COPY package*.json ./
 
-RUN echo ":: Testing npm..." && \
+RUN echo ":: Testing npm ..." && \
     if node -e "const net = require('net'); const client = net.createConnection({ port: 53, host: '8.8.8.8', timeout: 2000 }, () => { process.exit(0); }); client.on('error', () => { process.exit(1); }); client.on('timeout', () => { process.exit(1); });"; then \
         echo " -> Global" ; \
     else \
         echo " -> China" ; \
+        # Thanks https://mirrors.cloud.tencent.com
         npm config set registry https://mirrors.cloud.tencent.com/npm/ ; \
     fi && \
     npm install && \
@@ -30,12 +32,13 @@ COPY . .
 # --- 第二阶段：运行 ---
 FROM node:24-bookworm-slim
 
-RUN echo ":: Testing APT..." && \
+RUN echo ":: Testing apt ..." && \
     if node -e "const net = require('net'); const client = net.createConnection({ port: 53, host: '8.8.8.8', timeout: 2000 }, () => { process.exit(0); }); client.on('error', () => { process.exit(1); }); client.on('timeout', () => { process.exit(1); });"; then \
         echo " -> Global" ; \
     else \
         echo " -> China" ; \
-        printf "deb https://mirrors.ustc.edu.cn/debian/ bookworm main contrib non-free non-free-firmware\ndeb https://mirrors.ustc.edu.cn/debian/ bookworm-updates main contrib non-free non-free-firmware\ndeb https://mirrors.ustc.edu.cn/debian-security bookworm-security main contrib non-free non-free-firmware" > /etc/apt/sources.list; \
+        # Thanks https://github.com/mirrorz-org
+        printf "deb https://mirrors.cernet.edu.cn/debian/ bookworm main contrib non-free non-free-firmware\ndeb https://mirrors.cernet.edu.cn/debian/ bookworm-updates main contrib non-free non-free-firmware\ndeb https://mirrors.cernet.edu.cn/debian-security bookworm-security main contrib non-free non-free-firmware" > /etc/apt/sources.list; \
     fi && \
     apt-get update && apt-get install -y \
     ca-certificates \
