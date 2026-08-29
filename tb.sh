@@ -22,7 +22,7 @@ do_update(){
     docker compose pull && do_restart
 }
 
-case $1 in
+case "${1:-}" in
     start|up)
         do_start
         ;;
