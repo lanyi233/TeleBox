@@ -105,4 +105,28 @@ function getApiConfig(): Promise<TelegramAPI> {
   return configPromise;
 }
 
-export { getApiConfig, storeStringSession };
+/**
+ * Re-read config.json on every call. getApiConfig() caches the config (and the
+ * session string inside it) for the whole process; after a hot reload the
+ * cached string can be stale — the runtime client may have migrated DCs and
+ * received new auth keys that were never persisted. Rebuilding a client from
+ * the stale string then yields a dead session (Broken authorization key →
+ * AUTH_KEY_UNREGISTERED → interactive re-login), i.e. "reload loses session".
+ * Persist the fresh session via persistSession() whenever the key changes.
+ */
+function readFreshConfigSession(): string {
+  return loadConfig().session || "";
+}
+
+/**
+ * Persist the current runtime session string back into config.json.
+ * Safe to call frequently: skips the write when the string is unchanged.
+ */
+function persistSession(session: string): void {
+  const config = loadConfig();
+  if (config.session === session) return;
+  config.session = session;
+  saveConfig(config);
+}
+
+export { getApiConfig, storeStringSession, persistSession, readFreshConfigSession };

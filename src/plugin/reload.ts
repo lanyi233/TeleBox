@@ -92,6 +92,31 @@ function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
 }
 
+/**
+ * One status message per command run. Prefers editing the user's command
+ * message (self-message in Saved Messages); falls back to a fresh reply only
+ * when the edit is rejected — a forwarded command message cannot be edited
+ * by this account (MESSAGE_AUTHOR_REQUIRED), which is the one legitimate
+ * case for a second message. Every later progress edit targets the SAME
+ * message, so a full update/restart cycle never spawns extra messages.
+ */
+export async function ensureStatusMessage(
+  client: Api.Message["client"],
+  msg: Api.Message,
+  initialText: string
+): Promise<Api.Message> {
+  try {
+    await msg.edit({ text: initialText });
+    return msg;
+  } catch (editError) {
+    console.warn("[RELOAD] 编辑原消息失败，改为发送新状态消息:", editError);
+    return await client?.sendMessage(msg.chatId ?? msg.peerId, {
+      message: initialText,
+      replyTo: msg.id,
+    }) as Api.Message;
+  }
+}
+
 const editExitMsg = async () => {
   if (!fs.existsSync(exitFile)) return;
   let payload: {
@@ -207,16 +232,42 @@ if (fs.existsSync(exitFile)) {
 export async function executeExit(
   msg: Api.Message,
   options?: {
+    statusMessage?: Api.Message;
     pendingText?: string;
     successText?: string;
     parseMode?: "html" | "markdown";
   }
 ) {
   const pendingText = options?.pendingText ?? "🔄 正在结束进程...";
-  const result = await msg.edit({
+  // Reuse the run's status message when provided (update flow keeps ONE
+  // message for the whole cycle); otherwise edit the command message itself.
+  const target = options?.statusMessage ?? msg;
+  const editOpts = {
     text: pendingText,
     ...(options?.parseMode ? { parseMode: options.parseMode } : {}),
-  });
+  };
+  let result: Api.Message | undefined;
+  try {
+    result = await target.edit(editOpts);
+  } catch (editError) {
+    // Forwarded command messages can't be edited by this account — degrade:
+    // the other candidate message, then a fresh message so restart still reports.
+    console.warn("[RELOAD] 状态消息编辑失败，降级处理:", editError);
+    if (target !== msg) {
+      try {
+        result = await msg.edit(editOpts);
+      } catch {
+        /* fall through to sendMessage */
+      }
+    }
+    if (!result) {
+      const client = await getGlobalClient();
+      result = (await client.sendMessage(msg.chatId ?? msg.peerId, {
+        message: pendingText,
+        ...(options?.parseMode ? { parseMode: options.parseMode } : {}),
+      })) as Api.Message;
+    }
+  }
   const messageId =
     result && typeof result === "object" && "id" in result
       ? Number((result as Api.Message).id)
@@ -268,11 +319,7 @@ class ReloadPlugin extends Plugin {
   cmdHandlers: Record<string, (msg: Api.Message) => Promise<void>> = {
     reload: async (msg) => {
       const client = await getGlobalClient();
-
-const statusMessage = await client.sendMessage(msg.chatId ?? msg.peerId, {
-  message: "🔄 正在重新加载插件...",
-  replyTo: msg.id,
-});
+      const statusMessage = await ensureStatusMessage(client, msg, "🔄 正在重新加载插件...");
       const targetChat =
         resolvePersistableChatId(msg, statusMessage as Api.Message | undefined) ||
         statusMessage?.chatId ||

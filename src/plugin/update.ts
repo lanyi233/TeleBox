@@ -6,7 +6,7 @@ import { Api } from "teleproto";
 import { npm_install_project_dependencies } from "@utils/npm_install";
 import { getGlobalClient } from "@utils/runtimeManager";
 import { readDisplayVersion } from "@utils/teleboxInfoHelper";
-import { executeExit } from "./reload";
+import { executeExit, ensureStatusMessage } from "./reload";
 import { updateAllPlugins } from "./tpm";
 import * as fs from "fs";
 import * as path from "path";
@@ -107,6 +107,35 @@ async function getRemotes(): Promise<string[]> {
     return stdout.trim().split("\n").filter((r) => r.trim());
   } catch {
     return [];
+  }
+}
+
+/**
+ * Fetch every remote independently. `git fetch --all` aborts the whole update
+ * when ANY remote is unreachable (e.g. a deleted fork remote), which is how a
+ * stale mirror remote once blocked all auto-updates. One remote failing must
+ * not fail the update as long as the primary remote fetches cleanly.
+ */
+async function fetchRemoteBranches(): Promise<void> {
+  const remotes = await getRemotes();
+  if (remotes.length === 0) return;
+  const ordered = remotes.includes("origin")
+    ? ["origin", ...remotes.filter((r) => r !== "origin")]
+    : remotes;
+
+  const failures: string[] = [];
+  for (const remote of ordered) {
+    try {
+      await gitExec(["fetch", remote, "--prune"]);
+    } catch (e) {
+      const detail = getErrorMessage(e).split("\n").slice(-1)[0] || String(e);
+      failures.push(`${remote}: ${detail}`);
+      console.warn(`[update] fetch remote ${remote} failed (continuing):`, detail);
+    }
+  }
+  // Only fail when NOTHING could be fetched — then we truly have no fresh refs.
+  if (failures.length > 0 && failures.length === ordered.length) {
+    throw new Error(`所有远程 fetch 失败:\n${failures.join("\n")}`);
   }
 }
 
@@ -270,11 +299,7 @@ async function checkPluginsUpdate(): Promise<boolean | null> {
 
 async function handleVersion(msg: Api.Message): Promise<void> {
   const client = await getGlobalClient();
-
-const statusMessage = await client.sendMessage(msg.chatId ?? msg.peerId, {
-  message: "🔍 正在检查版本...",
-  replyTo: msg.id,
-});
+  const statusMessage = await ensureStatusMessage(client, msg, "🔍 正在检查版本...");
 
   const display = readDisplayVersion();
   const [mainUpdate, pluginUpdate] = await Promise.all([
@@ -368,23 +393,24 @@ export async function resumeAutofix(): Promise<void> {
 
 // ── Autofix: command entry (steps 1-3) ─────────────────────────────────
 async function handleAutofix(msg: Api.Message): Promise<void> {
+  const client = await getGlobalClient();
   const startTime = Date.now();
-  await msg.edit({ text: "🔧 正在修复：移除重名插件…" });
+  const statusMessage = await ensureStatusMessage(client, msg, "🔧 正在修复：移除重名插件…");
 
   try {
     const removed = removeCollidingPlugins();
 
-    await msg.edit({ text: "🔧 正在修复：同步远程代码…" });
-    await gitExec(["fetch", "origin"]);
+    await statusMessage.edit({ text: "🔧 正在修复：同步远程代码…" });
+    await fetchRemoteBranches();
     await gitExec(["reset", "--hard", "origin/main"]);
 
     const chatId = msg.chatId != null ? String(msg.chatId) : (msg.peerId != null ? String(msg.peerId) : null);
     if (chatId == null || msg.id == null) {
       throw new Error("无法定位当前消息，无法记录修复状态");
     }
-    saveAutofixState({ chatId, msgId: msg.id, startTime, removed });
+    saveAutofixState({ chatId, msgId: statusMessage.id ?? msg.id, startTime, removed });
 
-    await msg.edit({ text: "🔧 代码已同步，正在重启并更新插件…" });
+    await statusMessage.edit({ text: "🔧 代码已同步，正在重启并更新插件…" });
     console.log("[autofix] 步骤 1-3 完成，重启进程…");
     process.exit(0);
   } catch (error: unknown) {
@@ -392,7 +418,7 @@ async function handleAutofix(msg: Api.Message): Promise<void> {
     const detail = getErrorMessage(error) || String(error);
     console.error("[autofix] 修复失败:", detail);
     try {
-      await msg.edit({ text: `❌ 修复失败：${detail}` });
+      await statusMessage.edit({ text: `❌ 修复失败：${detail}` });
     } catch {
       /* ignore */
     }
@@ -427,11 +453,7 @@ async function remotePackageJsonChanged(remote: string, branch: string): Promise
 // ── Manual update (existing) ───────────────────────────────────────────
 async function update(force = false, msg: Api.Message) {
   const client = await getGlobalClient();
-
-const statusMessage = await client.sendMessage(msg.chatId ?? msg.peerId, {
-  message: "🚀 正在更新项目...",
-  replyTo: msg.id,
-});
+  const statusMessage = await ensureStatusMessage(client, msg, "🚀 正在更新项目...");
   console.clear();
   console.log("🚀 开始更新项目...\n");
 
@@ -444,7 +466,7 @@ const statusMessage = await client.sendMessage(msg.chatId ?? msg.peerId, {
     const { remote, branch } = branchInfo;
     const fullBranch = `${remote}/${branch}`;
 
-    await gitExec(["fetch", "--all"]);
+    await fetchRemoteBranches();
     await statusMessage.edit({ text: "🔄 正在拉取最新代码..." });
 
     // package.json 变更时自动走 -f：硬重置到远程，避免依赖声明冲突/半更新
@@ -470,6 +492,7 @@ const statusMessage = await client.sendMessage(msg.chatId ?? msg.peerId, {
     console.log("\n✅ 更新完成。");
 
     await executeExit(msg, {
+      statusMessage,
       pendingText: "🔄 正在重启进程...",
       successText: "✅ 更新完成，耗时 {elapsedMs}ms",
     });
@@ -672,7 +695,7 @@ async function autoUpdateMainRepo(githubMsg: Api.Message): Promise<void> {
     }
     const { remote, branch } = branchInfo;
 
-    await gitExec(["fetch", "--all"]);
+    await fetchRemoteBranches();
     if (await remotePackageJsonChanged(remote, branch)) {
       console.log("[auto-update] 📦 package.json 变更，自动 reset --hard（等同 update -f）");
       await gitExec(["reset", "--hard", `${remote}/${branch}`]);

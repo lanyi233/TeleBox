@@ -79,6 +79,8 @@ import {
 import { withTimeout } from "./asyncHelpers";
 import { registerRuntimeAccess } from "./runtimeAccess";
 import { flushPendingStatusDeletes } from "./postReloadMessage";
+import { persistSession, readFreshConfigSession } from "./apiConfig";
+import { isAuthKeyUnregisteredError, safeCheckAuthorization } from "./authGuards";
 
 export type { GenerationContext };
 
@@ -127,8 +129,16 @@ async function createClient(): Promise<TelegramClient> {
     proxy.timeout = 10; // seconds
   }
 
+  // Always build from the CURRENT config.json session, never the process-start
+  // cached value: after a DC migration the runtime client holds keys that were
+  // never persisted, and rebuilding from the stale string loses the session.
+  const currentSession = readFreshConfigSession();
+  if (currentSession && currentSession !== api.session) {
+    console.log("[RUNTIME] config.json session 已更新，使用最新 session 重建客户端");
+  }
+
   const client = new TelegramClient(
-    new StringSession(api.session),
+    new StringSession(currentSession),
     api.api_id!,
     api.api_hash!,
     {
@@ -141,6 +151,33 @@ async function createClient(): Promise<TelegramClient> {
   );
   client.setLogLevel(logger.getGramJSLogLevel() as never);
   return client;
+}
+
+/**
+ * Snapshot the runtime client's session into config.json before it is torn
+ * down. StringSession lives in memory: DC migrations and re-auths only update
+ * the in-memory session (connect()/_switchDC call session.save() which returns
+ * the string, but nothing here used to persist it). Without this, a reload
+ * rebuilds the client from the stale startup session → Broken authorization
+ * key → AUTH_KEY_UNREGISTERED → interactive re-login ("reload loses session").
+ */
+async function persistSessionIfAuthorized(client: TelegramClient, label: string): Promise<void> {
+  try {
+    // Check the key is still registered on the server — persisting a revoked
+    // session would poison config.json for the next start.
+    if (!(await safeCheckAuthorization(client))) {
+      console.warn(`[RUNTIME] ${label}: 跳过 session 持久化（未授权）`);
+      return;
+    }
+    const session = (client.session as StringSession).save();
+    if (session) {
+      persistSession(session);
+      console.log(`[RUNTIME] ${label}: session 已持久化到 config.json`);
+    }
+  } catch (error) {
+    if (isAuthKeyUnregisteredError(error)) return;
+    console.warn(`[RUNTIME] ${label}: session 持久化失败:`, error);
+  }
 }
 
 async function destroyClient(client: TelegramClient): Promise<void> {
@@ -332,6 +369,10 @@ async function disposeRuntime(
   runtime: TeleBoxRuntime,
   reason: string
 ): Promise<DrainResult> {
+  // Persist the session BEFORE any teardown — destroyClient() tears the
+  // connection down; checkAuthorization needs a live connection.
+  await persistSessionIfAuthorized(runtime.client, `Gen${runtime.generation} ${reason}`);
+
   if (runtime.context.state === "disposed") {
     console.log(`[RUNTIME] Generation ${runtime.generation} already disposed before ${reason}.`);
     await destroyClient(runtime.client);
